@@ -1,6 +1,9 @@
 package exchange
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
@@ -42,10 +45,10 @@ func NewBinanceHandler(apiKey string, secret string) *BinanceHandler {
 const BASE = "https://testnet.binancefuture.com"
 
 func (bh *BinanceHandler) Validate(s *BinanceSignal) error {
-	tsignal := bh.signal
-	if tsignal.Type != TYPE_OPEN {
-		return errInvalidSignal
-	}
+	// tsignal := bh.signal
+	// if tsignal.Type != TYPE_OPEN {
+	// 	return errInvalidSignal
+	// }
 	err := bh.handleLeverage()
 	if err != nil {
 		return err
@@ -56,8 +59,18 @@ func (bh *BinanceHandler) Validate(s *BinanceSignal) error {
 func (bh *BinanceHandler) handleLeverage() error {
 	endpoint := "/fapi/v2/positionRisk"
 	params := url.Values{}
-	params.Add("timestamp", strconv.FormatInt(time.Now().UnixMilli(), 10))
-	fullURL := BASE + endpoint + "?" + params.Encode()
+	timestamp := strconv.FormatInt(time.Now().UnixMilli(), 10)
+	params.Add("timestamp", timestamp)
+	params.Add("symbol", "BTCUSDT") // Note: Changed from "BTC/USDT" to "BTCUSDT"
+
+	// Create the query string without the signature
+	queryString := params.Encode()
+
+	// Generate the signature
+	signature := generateSignature(queryString, bh.secret)
+
+	// Construct the full URL with the query string and signature
+	fullURL := BASE + endpoint + "?" + queryString + "&signature=" + signature
 
 	req, err := http.NewRequest("GET", fullURL, nil)
 	if err != nil {
@@ -65,7 +78,7 @@ func (bh *BinanceHandler) handleLeverage() error {
 	}
 
 	// Add necessary headers
-	req.Header.Add("X-MBX-APIKEY", "YOUR_API_KEY_HERE")
+	req.Header.Add("X-MBX-APIKEY", bh.apiKey)
 
 	resp, err := bh.client.Do(req)
 	if err != nil {
@@ -88,6 +101,12 @@ func (bh *BinanceHandler) handleLeverage() error {
 	// otherwise compare leverage with the current one on the signal
 	// set accordingly if needed
 
+}
+
+func generateSignature(queryString, secret string) string {
+	h := hmac.New(sha256.New, []byte(secret))
+	h.Write([]byte(queryString))
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 func (bh *BinanceHandler) Process(s Signal) error {
