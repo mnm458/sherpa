@@ -14,9 +14,10 @@ func ping(w http.ResponseWriter, r *http.Request) {
 
 func (app *application) testBinance(w http.ResponseWriter, r *http.Request) {
 	err := app.binanceHandler.Process(exchange.BinanceSignal{
-		Contract: "BTCUSDT-4HR",
+		Symbol:   "BTCUSDT",
 		Type:     "open",
-		Action:   "long",
+		Action:   "BUY",
+		Leverage: 2,
 	})
 	if err != nil {
 		fmt.Println(err)

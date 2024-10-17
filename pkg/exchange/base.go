@@ -5,7 +5,13 @@ import "errors"
 type Signal interface {
 	GetType() string
 	GetAction() string
+	GetSymbol() string
+	GetLeverage() int64
 }
+
+const (
+	EQUITY_PERCENTAGE = 98
+)
 
 type ExchangeStrategy interface {
 	Process(Signal) error
