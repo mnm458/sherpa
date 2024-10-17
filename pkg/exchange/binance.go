@@ -261,6 +261,7 @@ func (bh *BinanceHandler) ExecuteMainOrder(s *BinanceSignal, price float64, quan
 	params.Add("symbol", s.Symbol)
 	params.Add("side", s.Action)
 	params.Add("type", "LIMIT")
+	params.Add("timeInForce", "GTC")
 	params.Add("quantity", quantity)
 	params.Add("price", strconv.FormatFloat(price, 'f', 4, 64))
 
@@ -390,10 +391,11 @@ func (bh *BinanceHandler) ExecuteTPOrder(s *BinanceSignal, price float64, quanti
 	params.Add("symbol", s.Symbol)
 	params.Add("side", s.Action)
 	params.Add("type", "TAKE_PROFIT")
+	params.Add("timeInForce", "GTC")
 	params.Add("reduceOnly", strconv.FormatBool(true))
 	params.Add("quantity", quantity)
-	params.Add("price", strconv.FormatFloat(tpPrice, 'f', 4, 64))
-	params.Add("stopPrice", strconv.FormatFloat(tpPrice, 'f', 4, 64))
+	params.Add("price", strconv.FormatFloat(tpPrice, 'f', 2, 64))
+	params.Add("stopPrice", strconv.FormatFloat(tpPrice, 'f', 2, 64))
 
 	// Create the query string without the signature
 	queryString := params.Encode()
@@ -446,11 +448,12 @@ func (bh *BinanceHandler) ExecuteSLOrder(s *BinanceSignal, price float64, quanti
 	params.Add("timestamp", timestamp)
 	params.Add("symbol", s.Symbol)
 	params.Add("side", s.Action)
+	params.Add("timeInForce", "GTC")
 	params.Add("type", "TAKE_PROFIT")
 	params.Add("reduceOnly", strconv.FormatBool(true))
 	params.Add("quantity", quantity)
-	params.Add("price", strconv.FormatFloat(slPrice, 'f', 4, 64))
-	params.Add("stopPrice", strconv.FormatFloat(slPrice, 'f', 4, 64))
+	params.Add("price", strconv.FormatFloat(slPrice, 'f', 2, 64))
+	params.Add("stopPrice", strconv.FormatFloat(slPrice, 'f', 2, 64))
 
 	// Create the query string without the signature
 	queryString := params.Encode()
