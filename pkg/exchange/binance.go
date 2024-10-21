@@ -7,12 +7,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"math"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
+
+	"github.com/gorilla/websocket"
 )
 
 const (
@@ -26,6 +30,25 @@ type BinanceSignal struct {
 	Leverage int64
 	TP       float64
 	SL       float64
+}
+type ReentryState struct {
+	Symbol       string
+	EntryPrice   float64
+	Leverage     int64
+	TP           float64
+	SL           float64
+	IsActive     bool
+	OriginalSide string
+}
+
+type WSMessage struct {
+	Stream string `json:"stream"`
+	Data   struct {
+		E string `json:"e"` // Event type
+		S string `json:"s"` // Symbol
+		P string `json:"p"` // Price
+		T int64  `json:"T"` // Trade time
+	} `json:"data"`
 }
 
 type BinanceAPIError struct {
@@ -62,9 +85,12 @@ func (bs BinanceSignal) GetLeverage() int64 {
 }
 
 type BinanceHandler struct {
-	apiKey string
-	secret string
-	client *http.Client
+	apiKey       string
+	secret       string
+	client       *http.Client
+	wsConn       *websocket.Conn
+	reentryMutex sync.Mutex
+	reentryState map[string]*ReentryState
 }
 
 func NewBinanceHandler(apiKey string, secret string) *BinanceHandler {
@@ -119,6 +145,14 @@ func (bh *BinanceHandler) Process(s Signal) error {
 	}
 
 	err = bh.ExecuteTPOrder(&binanceSignal, price, validatedQuantity)
+	if err != nil {
+		return err
+	}
+
+	err = bh.ExecuteSLOrder(&binanceSignal, price, validatedQuantity)
+	if err != nil {
+		return err
+	}
 
 	// if err = bh.ExecuteTPOrder(&binanceSignal, price, quantity); err != nil {
 	// 	return err
@@ -263,7 +297,7 @@ func (bh *BinanceHandler) ExecuteMainOrder(s *BinanceSignal, price float64, quan
 	params.Add("type", "LIMIT")
 	params.Add("timeInForce", "GTC")
 	params.Add("quantity", quantity)
-	params.Add("price", strconv.FormatFloat(price, 'f', 4, 64))
+	params.Add("price", strconv.FormatFloat(price, 'f', 2, 64))
 
 	// Create the query string without the signature
 	queryString := params.Encode()
@@ -380,22 +414,30 @@ func GetUSDTBalance(body []byte) (float64, error) {
 func (bh *BinanceHandler) ExecuteTPOrder(s *BinanceSignal, price float64, quantity string) error {
 	var tpPrice float64
 	if s.Action == "BUY" {
-		tpPrice = (s.TP + 1) * price
+		tpPrice = (s.TP + 1.0) * price
 	} else {
-		tpPrice = (1 - s.TP) * price
+		tpPrice = (1.0 - s.TP) * price
 	}
+	var tpAction string
+	switch s.Action {
+	case "BUY":
+		tpAction = "SELL"
+	case "SELL":
+		tpAction = "BUY"
+	}
+	fmt.Println("TP PRICE: ", tpPrice, "after conv: ", strconv.FormatFloat(tpPrice, 'f', 1, 64))
 	endpoint := "/fapi/v1/order"
 	params := url.Values{}
 	timestamp := strconv.FormatInt(time.Now().UnixMilli(), 10)
 	params.Add("timestamp", timestamp)
 	params.Add("symbol", s.Symbol)
-	params.Add("side", s.Action)
+	params.Add("side", tpAction)
 	params.Add("type", "TAKE_PROFIT")
 	params.Add("timeInForce", "GTC")
 	params.Add("reduceOnly", strconv.FormatBool(true))
 	params.Add("quantity", quantity)
-	params.Add("price", strconv.FormatFloat(tpPrice, 'f', 2, 64))
-	params.Add("stopPrice", strconv.FormatFloat(tpPrice, 'f', 2, 64))
+	params.Add("price", strconv.FormatFloat(tpPrice, 'f', 1, 64))
+	params.Add("stopPrice", strconv.FormatFloat(tpPrice, 'f', 1, 64))
 
 	// Create the query string without the signature
 	queryString := params.Encode()
@@ -437,23 +479,29 @@ func (bh *BinanceHandler) ExecuteTPOrder(s *BinanceSignal, price float64, quanti
 func (bh *BinanceHandler) ExecuteSLOrder(s *BinanceSignal, price float64, quantity string) error {
 	var slPrice float64
 	if s.Action == "BUY" {
-		slPrice = (1 - s.TP) * price
-		slPrice = (s.TP + 1) * price
+		slPrice = (1.0 - s.TP) * price
 	} else {
-		slPrice = (s.TP + 1) * price
+		slPrice = (s.TP + 1.0) * price
+	}
+	var slAction string
+	switch s.Action {
+	case "BUY":
+		slAction = "SELL"
+	case "SELL":
+		slAction = "BUY"
 	}
 	endpoint := "/fapi/v1/order"
 	params := url.Values{}
 	timestamp := strconv.FormatInt(time.Now().UnixMilli(), 10)
 	params.Add("timestamp", timestamp)
 	params.Add("symbol", s.Symbol)
-	params.Add("side", s.Action)
+	params.Add("side", slAction)
 	params.Add("timeInForce", "GTC")
-	params.Add("type", "TAKE_PROFIT")
+	params.Add("type", "STOP")
 	params.Add("reduceOnly", strconv.FormatBool(true))
 	params.Add("quantity", quantity)
-	params.Add("price", strconv.FormatFloat(slPrice, 'f', 2, 64))
-	params.Add("stopPrice", strconv.FormatFloat(slPrice, 'f', 2, 64))
+	params.Add("price", strconv.FormatFloat(slPrice, 'f', 1, 64))
+	params.Add("stopPrice", strconv.FormatFloat(slPrice, 'f', 1, 64))
 
 	// Create the query string without the signature
 	queryString := params.Encode()
@@ -488,7 +536,7 @@ func (bh *BinanceHandler) ExecuteSLOrder(s *BinanceSignal, price float64, quanti
 	}
 
 	// Print the response
-	fmt.Println("TP Order Response:", string(body))
+	fmt.Println("SL Order Response:", string(body))
 	return nil
 }
 
@@ -510,6 +558,7 @@ func (bh *BinanceHandler) ValidateQuantity(symbol string, quantity float64) (str
 				MinQty     string `json:"minQty"`
 				MaxQty     string `json:"maxQty"`
 				StepSize   string `json:"stepSize"`
+				TickSize   string `json:"tickSize"`
 			} `json:"filters"`
 		} `json:"symbols"`
 	}
@@ -527,7 +576,9 @@ func (bh *BinanceHandler) ValidateQuantity(symbol string, quantity float64) (str
 
 	for _, s := range exchangeInfo.Symbols {
 		if s.Symbol == symbol {
+
 			for _, filter := range s.Filters {
+				fmt.Println("TICK SIZE IS: ", filter.TickSize)
 				if filter.FilterType == "LOT_SIZE" {
 					lotSizeFilter.MinQty, _ = strconv.ParseFloat(filter.MinQty, 64)
 					lotSizeFilter.MaxQty, _ = strconv.ParseFloat(filter.MaxQty, 64)
@@ -625,4 +676,155 @@ func (bh *BinanceHandler) CancelAllOpenOrders(symbol string) error {
 	}
 
 	return nil
+}
+
+func (bh *BinanceHandler) StartReentryMonitoring(symbol string, entryPrice float64, leverage int64, tp, sl float64, side string) error {
+	if bh.wsConn == nil {
+		if err := bh.connectWebSocket(); err != nil {
+			return err
+		}
+	}
+
+	bh.reentryMutex.Lock()
+	if bh.reentryState == nil {
+		bh.reentryState = make(map[string]*ReentryState)
+	}
+	bh.reentryState[symbol] = &ReentryState{
+		Symbol:       symbol,
+		EntryPrice:   entryPrice,
+		Leverage:     leverage,
+		TP:           tp,
+		SL:           sl,
+		IsActive:     true,
+		OriginalSide: side,
+	}
+	bh.reentryMutex.Unlock()
+
+	go bh.handleWebSocketMessages()
+
+	// Subscribe to the symbol's trade stream
+	subscribeMsg := fmt.Sprintf(`{"method": "SUBSCRIBE", "params": ["%s@trade"], "id": 1}`, strings.ToLower(symbol))
+	if err := bh.wsConn.WriteMessage(websocket.TextMessage, []byte(subscribeMsg)); err != nil {
+		return fmt.Errorf("failed to subscribe to trade stream: %w", err)
+	}
+
+	return nil
+}
+
+func (bh *BinanceHandler) connectWebSocket() error {
+	u := url.URL{Scheme: "wss", Host: "testnet.binancefuture.com", Path: "/ws-fapi/v1"}
+	c, _, err := websocket.DefaultDialer.Dial(u.String(), nil)
+	if err != nil {
+		return fmt.Errorf("failed to connect to WebSocket: %w", err)
+	}
+	bh.wsConn = c
+	return nil
+}
+
+func (bh *BinanceHandler) handleWebSocketMessages() {
+	for {
+		_, message, err := bh.wsConn.ReadMessage()
+		if err != nil {
+			log.Println("WebSocket read error:", err)
+			return
+		}
+
+		var wsMsg WSMessage
+		if err := json.Unmarshal(message, &wsMsg); err != nil {
+			log.Println("Failed to unmarshal WebSocket message:", err)
+			continue
+		}
+
+		if wsMsg.Data.E == "trade" {
+			bh.checkAndPlaceReentryOrder(wsMsg.Data.S, wsMsg.Data.P)
+		}
+	}
+}
+
+func (bh *BinanceHandler) checkAndPlaceReentryOrder(symbol, priceStr string) {
+	price, err := strconv.ParseFloat(priceStr, 64)
+	if err != nil {
+		log.Println("Failed to parse price:", err)
+		return
+	}
+
+	bh.reentryMutex.Lock()
+	defer bh.reentryMutex.Unlock()
+
+	state, exists := bh.reentryState[symbol]
+	if !exists || !state.IsActive {
+		return
+	}
+
+	// Check if price has crossed the entry price
+	if (state.OriginalSide == "BUY" && price <= state.EntryPrice) ||
+		(state.OriginalSide == "SELL" && price >= state.EntryPrice) {
+		// Place re-entry order
+		if err := bh.placeReentryOrder(state); err != nil {
+			log.Println("Failed to place re-entry order:", err)
+			return
+		}
+		// Deactivate re-entry for this symbol
+		state.IsActive = false
+	}
+}
+
+func (bh *BinanceHandler) placeReentryOrder(state *ReentryState) error {
+	// Place main order
+	if err := bh.ExecuteMainOrder(&BinanceSignal{
+		Symbol:   state.Symbol,
+		Action:   state.OriginalSide,
+		Leverage: state.Leverage,
+		TP:       state.TP,
+		SL:       state.SL,
+	}, state.EntryPrice, ""); err != nil {
+		return fmt.Errorf("failed to place main re-entry order: %w", err)
+	}
+
+	// Place TP order
+	if err := bh.ExecuteTPOrder(&BinanceSignal{
+		Symbol:   state.Symbol,
+		Action:   state.OriginalSide,
+		Leverage: state.Leverage,
+		TP:       state.TP,
+		SL:       state.SL,
+	}, state.EntryPrice, ""); err != nil {
+		return fmt.Errorf("failed to place TP re-entry order: %w", err)
+	}
+
+	// Place SL order
+	if err := bh.ExecuteSLOrder(&BinanceSignal{
+		Symbol:   state.Symbol,
+		Action:   state.OriginalSide,
+		Leverage: state.Leverage,
+		TP:       state.TP,
+		SL:       state.SL,
+	}, state.EntryPrice, ""); err != nil {
+		return fmt.Errorf("failed to place SL re-entry order: %w", err)
+	}
+
+	return nil
+}
+
+// Add this method to stop monitoring for re-entry
+func (bh *BinanceHandler) StopReentryMonitoring(symbol string) {
+	bh.reentryMutex.Lock()
+	defer bh.reentryMutex.Unlock()
+
+	if state, exists := bh.reentryState[symbol]; exists {
+		state.IsActive = false
+	}
+
+	// Unsubscribe from the symbol's trade stream
+	unsubscribeMsg := fmt.Sprintf(`{"method": "UNSUBSCRIBE", "params": ["%s@trade"], "id": 1}`, strings.ToLower(symbol))
+	if err := bh.wsConn.WriteMessage(websocket.TextMessage, []byte(unsubscribeMsg)); err != nil {
+		log.Println("Failed to unsubscribe from trade stream:", err)
+	}
+}
+
+// Don't forget to close the WebSocket connection when you're done
+func (bh *BinanceHandler) CloseWebSocket() {
+	if bh.wsConn != nil {
+		bh.wsConn.Close()
+	}
 }
