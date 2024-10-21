@@ -1,6 +1,7 @@
 package exchange
 
 import (
+	"crypto/ed25519"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -85,19 +86,27 @@ func (bs BinanceSignal) GetLeverage() int64 {
 }
 
 type BinanceHandler struct {
-	apiKey       string
-	secret       string
-	client       *http.Client
-	wsConn       *websocket.Conn
-	reentryMutex sync.Mutex
-	reentryState map[string]*ReentryState
+	apiKey         string
+	secret         string
+	client         *http.Client
+	wsConn         *websocket.Conn
+	reentryMutex   sync.Mutex
+	reentryState   map[string]*ReentryState
+	isRunning      bool
+	doneCh         chan struct{}
+	pingTicker     *time.Ticker
+	lastPongTime   time.Time
+	authenticated  bool
+	connectedSince time.Time
 }
 
 func NewBinanceHandler(apiKey string, secret string) *BinanceHandler {
 	return &BinanceHandler{
-		apiKey: apiKey,
-		secret: secret,
-		client: &http.Client{},
+		apiKey:       apiKey,
+		secret:       secret,
+		client:       &http.Client{},
+		reentryState: make(map[string]*ReentryState),
+		doneCh:       make(chan struct{}),
 	}
 }
 
@@ -154,6 +163,23 @@ func (bh *BinanceHandler) Process(s Signal) error {
 		return err
 	}
 
+	err = bh.StartReentryMonitoring(binanceSignal.Symbol, price, binanceSignal.Leverage, binanceSignal.TP, binanceSignal.SL, binanceSignal.Action)
+	if err != nil {
+		log.Printf("Failed to start re-entry monitoring for %s: %v", binanceSignal.Symbol, err)
+		// Consider whether you want to return this error or just log it
+		// return err
+	}
+
+	// Set up a timeout for the re-entry monitoring
+	go func() {
+		// Adjust the timeout duration as needed
+		time.Sleep(24 * time.Hour)
+		bh.StopReentryMonitoring(binanceSignal.Symbol)
+		log.Printf("Re-entry monitoring for %s stopped after timeout", binanceSignal.Symbol)
+	}()
+
+	return nil
+
 	// if err = bh.ExecuteTPOrder(&binanceSignal, price, quantity); err != nil {
 	// 	return err
 	// }
@@ -169,7 +195,6 @@ func (bh *BinanceHandler) Process(s Signal) error {
 
 	// 	return err
 	// }
-	return nil
 
 }
 func (bh *BinanceHandler) sendRequest(method, endpoint string, params url.Values, needsAuth bool) ([]byte, error) {
@@ -679,16 +704,15 @@ func (bh *BinanceHandler) CancelAllOpenOrders(symbol string) error {
 }
 
 func (bh *BinanceHandler) StartReentryMonitoring(symbol string, entryPrice float64, leverage int64, tp, sl float64, side string) error {
+	bh.reentryMutex.Lock()
+	defer bh.reentryMutex.Unlock()
+
 	if bh.wsConn == nil {
 		if err := bh.connectWebSocket(); err != nil {
 			return err
 		}
 	}
 
-	bh.reentryMutex.Lock()
-	if bh.reentryState == nil {
-		bh.reentryState = make(map[string]*ReentryState)
-	}
 	bh.reentryState[symbol] = &ReentryState{
 		Symbol:       symbol,
 		EntryPrice:   entryPrice,
@@ -698,9 +722,11 @@ func (bh *BinanceHandler) StartReentryMonitoring(symbol string, entryPrice float
 		IsActive:     true,
 		OriginalSide: side,
 	}
-	bh.reentryMutex.Unlock()
 
-	go bh.handleWebSocketMessages()
+	if !bh.isRunning {
+		bh.isRunning = true
+		go bh.websocketHandler()
+	}
 
 	// Subscribe to the symbol's trade stream
 	subscribeMsg := fmt.Sprintf(`{"method": "SUBSCRIBE", "params": ["%s@trade"], "id": 1}`, strings.ToLower(symbol))
@@ -718,7 +744,175 @@ func (bh *BinanceHandler) connectWebSocket() error {
 		return fmt.Errorf("failed to connect to WebSocket: %w", err)
 	}
 	bh.wsConn = c
+	bh.connectedSince = time.Now()
+	bh.authenticated = false
+
+	// Start ping ticker
+	bh.pingTicker = time.NewTicker(3 * time.Minute)
+	go bh.pingHandler()
+
 	return nil
+}
+
+func (bh *BinanceHandler) pingHandler() {
+	for {
+		select {
+		case <-bh.pingTicker.C:
+			if err := bh.wsConn.WriteMessage(websocket.PingMessage, []byte{}); err != nil {
+				log.Println("Failed to send ping:", err)
+				return
+			}
+		case <-bh.doneCh:
+			return
+		}
+	}
+}
+
+func (bh *BinanceHandler) websocketHandler() {
+	for bh.isRunning {
+		if err := bh.connectWebSocket(); err != nil {
+			log.Println("Failed to connect to WebSocket:", err)
+			time.Sleep(5 * time.Second)
+			continue
+		}
+
+		if err := bh.authenticate(); err != nil {
+			log.Println("Failed to authenticate WebSocket connection:", err)
+			bh.wsConn.Close()
+			time.Sleep(5 * time.Second)
+			continue
+		}
+
+		if err := bh.readMessages(); err != nil {
+			log.Println("WebSocket error:", err)
+			bh.wsConn.Close()
+			time.Sleep(5 * time.Second)
+		}
+	}
+}
+func (bh *BinanceHandler) generateEd25519Signature(payload string) string {
+	seed, err := hex.DecodeString(bh.secret)
+	if err != nil {
+		log.Printf("Error decoding secret key: %v", err)
+		return ""
+	}
+
+	if len(seed) != ed25519.SeedSize {
+		log.Printf("Invalid seed length. Expected %d, got %d", ed25519.SeedSize, len(seed))
+		return ""
+	}
+
+	// Generate the full private key from the seed
+	privateKey := ed25519.NewKeyFromSeed(seed)
+
+	// Sign the payload
+	signature := ed25519.Sign(privateKey, []byte(payload))
+	return hex.EncodeToString(signature)
+}
+
+func (bh *BinanceHandler) authenticate() error {
+	timestamp := time.Now().UnixMilli()
+
+	// Construct the payload string
+	// Sort parameters alphabetically: apiKey, timestamp
+	payload := fmt.Sprintf("apiKey=%s&timestamp=%d", bh.apiKey, timestamp)
+
+	// Generate the signature
+	signature := bh.generateEd25519Signature(payload)
+
+	authMsg := struct {
+		ID     string `json:"id"`
+		Method string `json:"method"`
+		Params struct {
+			APIKey    string `json:"apiKey"`
+			Signature string `json:"signature"`
+			Timestamp int64  `json:"timestamp"`
+		} `json:"params"`
+	}{
+		ID:     "auth",
+		Method: "session.logon",
+		Params: struct {
+			APIKey    string `json:"apiKey"`
+			Signature string `json:"signature"`
+			Timestamp int64  `json:"timestamp"`
+		}{
+			APIKey:    bh.apiKey,
+			Signature: signature,
+			Timestamp: timestamp,
+		},
+	}
+
+	jsonMsg, _ := json.Marshal(authMsg)
+	log.Printf("Sending authentication message: %s", string(jsonMsg))
+
+	if err := bh.wsConn.WriteJSON(authMsg); err != nil {
+		return fmt.Errorf("failed to send authentication message: %w", err)
+	}
+
+	_, msg, err := bh.wsConn.ReadMessage()
+	if err != nil {
+		return fmt.Errorf("failed to read authentication response: %w", err)
+	}
+
+	log.Printf("Received authentication response: %s", string(msg))
+
+	var response struct {
+		ID     string `json:"id"`
+		Status int    `json:"status"`
+		Result struct {
+			APIKey          string `json:"apiKey"`
+			AuthorizedSince int64  `json:"authorizedSince"`
+		} `json:"result"`
+		Error *struct {
+			Code int    `json:"code"`
+			Msg  string `json:"msg"`
+		} `json:"error,omitempty"`
+	}
+
+	if err := json.Unmarshal(msg, &response); err != nil {
+		return fmt.Errorf("failed to parse authentication response: %w", err)
+	}
+
+	if response.Status != 200 {
+		if response.Error != nil {
+			return fmt.Errorf("authentication failed: code=%d, msg=%s", response.Error.Code, response.Error.Msg)
+		}
+		return fmt.Errorf("authentication failed: %s", string(msg))
+	}
+
+	bh.authenticated = true
+	return nil
+}
+
+func (bh *BinanceHandler) readMessages() error {
+	for {
+		select {
+		case <-bh.doneCh:
+			return nil
+		default:
+			_, message, err := bh.wsConn.ReadMessage()
+			if err != nil {
+				if websocket.IsCloseError(err, websocket.CloseNormalClosure) {
+					return nil
+				}
+				return err
+			}
+
+			if bh.wsConn.PongHandler() != nil {
+				bh.lastPongTime = time.Now()
+			}
+
+			var wsMsg WSMessage
+			if err := json.Unmarshal(message, &wsMsg); err != nil {
+				log.Println("Failed to unmarshal WebSocket message:", err)
+				continue
+			}
+
+			if wsMsg.Data.E == "trade" {
+				bh.checkAndPlaceReentryOrder(wsMsg.Data.S, wsMsg.Data.P)
+			}
+		}
+	}
 }
 
 func (bh *BinanceHandler) handleWebSocketMessages() {
@@ -824,6 +1018,15 @@ func (bh *BinanceHandler) StopReentryMonitoring(symbol string) {
 
 // Don't forget to close the WebSocket connection when you're done
 func (bh *BinanceHandler) CloseWebSocket() {
+	bh.reentryMutex.Lock()
+	defer bh.reentryMutex.Unlock()
+	bh.isRunning = false
+	if bh.doneCh != nil {
+		close(bh.doneCh)
+	}
+	if bh.pingTicker != nil {
+		bh.pingTicker.Stop()
+	}
 	if bh.wsConn != nil {
 		bh.wsConn.Close()
 	}
