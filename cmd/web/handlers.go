@@ -19,7 +19,7 @@ func (app *application) testBinance(w http.ResponseWriter, r *http.Request) {
 		Action:   "BUY",
 		Leverage: 2,
 		TP:       0.01,
-		SL:       -0.19,
+		SL:       -0.019,
 	})
 	if err != nil {
 		fmt.Println(err)
