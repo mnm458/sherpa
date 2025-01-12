@@ -1,7 +1,6 @@
 package exchange
 
 import (
-	"crypto/ed25519"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -9,15 +8,18 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"log/slog"
 	"math"
 	"net/http"
 	"net/url"
+	"os"
+	"os/signal"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/gorilla/websocket"
+	"github.com/mnm458/sherpa/pkg/fstream"
 )
 
 const (
@@ -41,17 +43,37 @@ type ReentryState struct {
 	IsActive     bool
 	OriginalSide string
 }
-
-type WSMessage struct {
-	Stream string `json:"stream"`
-	Data   struct {
-		E string `json:"e"` // Event type
-		S string `json:"s"` // Symbol
-		P string `json:"p"` // Price
-		T int64  `json:"T"` // Trade time
-	} `json:"data"`
+type Order struct {
+	AvgPrice            string `json:"avgPrice"`
+	ClientOrderId       string `json:"clientOrderId"`
+	CumQuote            string `json:"cumQuote"`
+	ExecutedQty         string `json:"executedQty"`
+	OrderId             int64  `json:"orderId"`
+	OrigQty             string `json:"origQty"`
+	OrigType            string `json:"origType"`
+	Price               string `json:"price"`
+	ReduceOnly          bool   `json:"reduceOnly"`
+	Side                string `json:"side"`
+	PositionSide        string `json:"positionSide"`
+	Status              string `json:"status"`
+	StopPrice           string `json:"stopPrice"`
+	ClosePosition       bool   `json:"closePosition"`
+	Symbol              string `json:"symbol"`
+	Time                int64  `json:"time"`
+	TimeInForce         string `json:"timeInForce"`
+	Type                string `json:"type"`
+	ActivatePrice       string `json:"activatePrice"`
+	PriceRate           string `json:"priceRate"`
+	UpdateTime          int64  `json:"updateTime"`
+	WorkingType         string `json:"workingType"`
+	PriceProtect        bool   `json:"priceProtect"`
+	PriceMatch          string `json:"priceMatch"`
+	SelfTradePrevention string `json:"selfTradePreventionMode"`
+	GoodTillDate        int64  `json:"goodTillDate"`
 }
-
+type OrderResponse struct {
+	OrderId int64 `json:"orderId"`
+}
 type BinanceAPIError struct {
 	Code int    `json:"code"`
 	Msg  string `json:"msg"`
@@ -62,8 +84,10 @@ type PriceResp struct {
 }
 
 type BalanceResp struct {
-	Asset   string `json:"asset"`
-	Balance string `json:"balance"`
+	Asset              string `json:"asset"`
+	WalletBalance      string `json:"walletBalance"`      // Modified
+	CrossWalletBalance string `json:"crossWalletBalance"` // Added
+	Balance            string `json:"balance"`            // Kept for compatibility
 }
 
 type USDTBalance struct {
@@ -84,99 +108,105 @@ func (bs BinanceSignal) GetSymbol() string {
 func (bs BinanceSignal) GetLeverage() int64 {
 	return bs.Leverage
 }
+func (b BinanceSignal) String() string {
+	return fmt.Sprintf("Symbol: %s, Type: %s, Action: %s, Leverage: %d, TP: %.2f, SL: %.2f",
+		b.Symbol, b.Type, b.Action, b.Leverage, b.TP, b.SL)
+}
 
 type BinanceHandler struct {
 	apiKey         string
 	secret         string
 	client         *http.Client
-	wsConn         *websocket.Conn
+	fstream        *fstream.MarketStreamHandler
 	reentryMutex   sync.Mutex
 	reentryState   map[string]*ReentryState
-	isRunning      bool
 	doneCh         chan struct{}
-	pingTicker     *time.Ticker
-	lastPongTime   time.Time
-	authenticated  bool
-	connectedSince time.Time
+	logger         *slog.Logger
+	executedOrders *[3]int64
 }
 
-func NewBinanceHandler(apiKey string, secret string) *BinanceHandler {
+func NewBinanceHandler(apiKey string, secret string, logger *slog.Logger) *BinanceHandler {
 	return &BinanceHandler{
-		apiKey:       apiKey,
-		secret:       secret,
-		client:       &http.Client{},
-		reentryState: make(map[string]*ReentryState),
-		doneCh:       make(chan struct{}),
+		apiKey:         apiKey,
+		secret:         secret,
+		client:         &http.Client{},
+		reentryState:   make(map[string]*ReentryState),
+		doneCh:         make(chan struct{}),
+		logger:         logger,
+		executedOrders: &[3]int64{},
 	}
 }
 
 func (bh *BinanceHandler) Process(s Signal) error {
 	binanceSignal, ok := s.(BinanceSignal)
-	if !ok {
+	if ok {
+		bh.logger.Info("processing signal", "signal", binanceSignal.String())
+	} else {
+		bh.logger.Error("Failed to cast signal to BinanceSignal")
 		return errInvalidSignal
 	}
 	if err := bh.Validate(&binanceSignal); err != nil {
+		bh.logger.Error("Failed to validate signal", "error", err)
 		return err
 	}
 
 	price, err := bh.FetchCurrPrice(s.GetSymbol())
 	if err != nil {
+		bh.logger.Error("Failed to fetch price", "error", err)
 		return err
 	}
 
 	totBalance, err := bh.GetAccountBalance()
 	if err != nil {
+		bh.logger.Error("Failed to get balance", "error", err)
 		return err
 	}
-	fmt.Println("TOTAL BALANCE: ", totBalance)
-	fmt.Println("Price", price)
-	availBalance := EQUITY_PERCENTAGE * totBalance
-	fmt.Println("Avail BALANCE: ", availBalance)
-	leverage := float64(s.GetLeverage())
-	fmt.Println("leverage:", leverage)
-	quantity := (availBalance * leverage) / price
 
-	fmt.Println("QUANTITY before", quantity)
+	availBalance := EQUITY_PERCENTAGE * totBalance
+	leverage := float64(s.GetLeverage())
+	quantity := (availBalance * leverage) / price
+	bh.logger.Info("checkpoint 1", "Balance", totBalance, "Price", price, "Available Balance", availBalance, "Quantity", quantity)
 	validatedQuantity, err := bh.ValidateQuantity(binanceSignal.Symbol, quantity)
 	if err != nil {
+		bh.logger.Error("Failed to validate quantity", "error", err)
 		return err
 	}
-	fmt.Println("QUANTITY after", validatedQuantity)
 
 	err = bh.CancelAllOpenOrders(binanceSignal.Symbol)
 	if err != nil {
+		bh.logger.Error("Failed to cancel all orders", "error", err)
 		return err
 	}
 
 	err = bh.ExecuteMainOrder(&binanceSignal, price, validatedQuantity)
 	if err != nil {
+		bh.logger.Error("Failed to execute main order", "error", err)
 		return err
 	}
 
 	err = bh.ExecuteTPOrder(&binanceSignal, price, validatedQuantity)
 	if err != nil {
+		bh.logger.Error("Failed to execute TP order", "error", err)
 		return err
 	}
 
 	err = bh.ExecuteSLOrder(&binanceSignal, price, validatedQuantity)
 	if err != nil {
+		bh.logger.Error("Failed to execute SL order", "error", err)
 		return err
 	}
 
 	err = bh.StartReentryMonitoring(binanceSignal.Symbol, price, binanceSignal.Leverage, binanceSignal.TP, binanceSignal.SL, binanceSignal.Action)
 	if err != nil {
-		log.Printf("Failed to start re-entry monitoring for %s: %v", binanceSignal.Symbol, err)
-		// Consider whether you want to return this error or just log it
-		// return err
+		bh.logger.Error("Failed to start re-entry monitoring", "symbol", binanceSignal.Symbol, "error", err)
 	}
-
-	// Set up a timeout for the re-entry monitoring
-	go func() {
-		// Adjust the timeout duration as needed
-		time.Sleep(24 * time.Hour)
-		bh.StopReentryMonitoring(binanceSignal.Symbol)
-		log.Printf("Re-entry monitoring for %s stopped after timeout", binanceSignal.Symbol)
-	}()
+	// // Set up a timeout for the re-entry monitoring
+	// go func() {
+	// 	// Adjust the timeout duration as needed
+	// 	time.Sleep(24 * time.Hour)
+	// 	bh.StopReentryMonitoring(binanceSignal.Symbol)
+	// 	log.Printf("Re-entry monitoring for %s stopped after timeout", binanceSignal.Symbol)
+	// }()
 
 	return nil
 
@@ -312,6 +342,50 @@ func (bh *BinanceHandler) FetchCurrPrice(symbol string) (float64, error) {
 	return price, nil
 }
 
+func (bh *BinanceHandler) GetAccountBalance() (float64, error) {
+	endpoint := "/fapi/v2/balance"
+	timestamp := fmt.Sprintf("%d", time.Now().UnixMilli())
+
+	// Create the query string
+	queryString := fmt.Sprintf("timestamp=%s", timestamp)
+
+	// Create the signature
+	signature := bh.generateSignature(queryString)
+
+	// Construct the full URL
+	fullURL := fmt.Sprintf("%s%s?%s&signature=%s", BASE, endpoint, queryString, signature)
+
+	// Create and send the request
+	req, err := http.NewRequest("GET", fullURL, nil)
+	if err != nil {
+		return 0, fmt.Errorf("error creating request: %w", err)
+	}
+
+	req.Header.Set("X-MBX-APIKEY", bh.apiKey)
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, fmt.Errorf("error sending request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// Read and return the response body
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0, fmt.Errorf("error reading response: %w", err)
+	}
+
+	usdtBalance, err := GetUSDTBalance(body)
+	if err != nil {
+		return 0, err
+	}
+
+	fmt.Println("USDT BALANCE: ", usdtBalance)
+
+	return usdtBalance, nil
+}
+
 func (bh *BinanceHandler) ExecuteMainOrder(s *BinanceSignal, price float64, quantity string) error {
 	endpoint := "/fapi/v1/order"
 	params := url.Values{}
@@ -358,84 +432,49 @@ func (bh *BinanceHandler) ExecuteMainOrder(s *BinanceSignal, price float64, quan
 
 	// Print the response
 	fmt.Println("Main Order Response:", string(body))
+
+	var orderResp OrderResponse
+	if err := json.Unmarshal(body, &orderResp); err != nil {
+		return fmt.Errorf("error parsing order response: %w", err)
+	}
+	bh.logger.Info("Main order placed",
+		"orderId", orderResp.OrderId,
+		"symbol", s.Symbol,
+		"side", s.Action,
+	)
+	bh.executedOrders[0] = orderResp.OrderId
 	return nil
-}
-
-func (bh *BinanceHandler) GetAccountBalance() (float64, error) {
-	endpoint := "/fapi/v2/balance"
-	timestamp := fmt.Sprintf("%d", time.Now().UnixMilli())
-
-	// Create the query string
-	queryString := fmt.Sprintf("timestamp=%s", timestamp)
-
-	// Create the signature
-	signature := bh.generateSignature(queryString)
-
-	// Construct the full URL
-	fullURL := fmt.Sprintf("%s%s?%s&signature=%s", BASE, endpoint, queryString, signature)
-
-	// Create and send the request
-	req, err := http.NewRequest("GET", fullURL, nil)
-	if err != nil {
-		return 0, fmt.Errorf("error creating request: %w", err)
-	}
-
-	req.Header.Set("X-MBX-APIKEY", bh.apiKey)
-
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		return 0, fmt.Errorf("error sending request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	// Read and return the response body
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return 0, fmt.Errorf("error reading response: %w", err)
-	}
-
-	usdtBalance, err := GetUSDTBalance(body)
-	if err != nil {
-		return 0, err
-	}
-
-	fmt.Println("USDT BALANCE: ", usdtBalance)
-
-	return usdtBalance, nil
-}
-
-func (u *USDTBalance) UnmarshalJSON(data []byte) error {
-	var balances []BalanceResp
-	if err := json.Unmarshal(data, &balances); err != nil {
-		return err
-	}
-
-	for _, balance := range balances {
-		if balance.Asset == "USDT" {
-			val, err := strconv.ParseFloat(balance.Balance, 64)
-			if err != nil {
-				return err
-			}
-			u.USDTBalance = val
-			return nil
-		}
-	}
-
-	return fmt.Errorf("USDT balance not found")
 }
 
 // In your main function or wherever you're handling the response:
 func GetUSDTBalance(body []byte) (float64, error) {
-	var usdtBalance USDTBalance
-	err := json.Unmarshal(body, &usdtBalance)
-	if err != nil {
-		return 0, fmt.Errorf("error unmarshaling USDT balance: %w", err)
+	var balances []BalanceResp
+	if err := json.Unmarshal(body, &balances); err != nil {
+		return 0, fmt.Errorf("error unmarshaling balance array: %w", err)
 	}
 
-	return usdtBalance.USDTBalance, nil
-}
+	// Find USDT balance
+	for _, balance := range balances {
+		if balance.Asset == "USDT" {
+			// Try crossWalletBalance first, then walletBalance, then balance
+			balanceStr := balance.CrossWalletBalance
+			if balanceStr == "" {
+				balanceStr = balance.WalletBalance
+			}
+			if balanceStr == "" {
+				balanceStr = balance.Balance
+			}
 
+			val, err := strconv.ParseFloat(balanceStr, 64)
+			if err != nil {
+				return 0, fmt.Errorf("error parsing USDT balance: %w", err)
+			}
+			return val, nil
+		}
+	}
+
+	return 0, fmt.Errorf("USDT balance not found in response")
+}
 func (bh *BinanceHandler) ExecuteTPOrder(s *BinanceSignal, price float64, quantity string) error {
 	var tpPrice float64
 	if s.Action == "BUY" {
@@ -496,6 +535,16 @@ func (bh *BinanceHandler) ExecuteTPOrder(s *BinanceSignal, price float64, quanti
 		return fmt.Errorf("error reading response: %v", err)
 	}
 
+	var orderResp OrderResponse
+	if err := json.Unmarshal(body, &orderResp); err != nil {
+		return fmt.Errorf("error parsing order response: %w", err)
+	}
+	bh.logger.Info("TP order placed",
+		"orderId", orderResp.OrderId,
+		"symbol", s.Symbol,
+		"side", s.Action,
+	)
+	bh.executedOrders[1] = orderResp.OrderId
 	// Print the response
 	fmt.Println("TP Order Response:", string(body))
 	return nil
@@ -559,10 +608,71 @@ func (bh *BinanceHandler) ExecuteSLOrder(s *BinanceSignal, price float64, quanti
 	if err != nil {
 		return fmt.Errorf("error reading response: %v", err)
 	}
-
+	var orderResp OrderResponse
+	if err := json.Unmarshal(body, &orderResp); err != nil {
+		return fmt.Errorf("error parsing order response: %w", err)
+	}
+	bh.logger.Info("SL order placed",
+		"orderId", orderResp.OrderId,
+		"symbol", s.Symbol,
+		"side", s.Action,
+	)
+	bh.executedOrders[2] = orderResp.OrderId
 	// Print the response
 	fmt.Println("SL Order Response:", string(body))
 	return nil
+}
+
+func (bh *BinanceHandler) GetOrder(symbol string, orderId int64) (*Order, error) {
+	endpoint := "/fapi/v1/order"
+
+	// Create parameters
+	params := url.Values{}
+	params.Add("timestamp", strconv.FormatInt(time.Now().UnixMilli(), 10))
+	params.Add("symbol", symbol)
+	params.Add("orderId", strconv.FormatInt(orderId, 10))
+
+	// Generate signature
+	queryString := params.Encode()
+	signature := bh.generateSignature(queryString)
+
+	// Construct full URL with query string and signature
+	fullURL := BASE + endpoint + "?" + queryString + "&signature=" + signature
+
+	// Create request
+	req, err := http.NewRequest("GET", fullURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("error creating request: %w", err)
+	}
+
+	// Add headers
+	req.Header.Add("X-MBX-APIKEY", bh.apiKey)
+
+	// Send request
+	resp, err := bh.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("error sending request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// Read response body
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("error reading response: %w", err)
+	}
+
+	// Check for error status
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("API error: %s", string(body))
+	}
+
+	// Parse response
+	var order Order
+	if err := json.Unmarshal(body, &order); err != nil {
+		return nil, fmt.Errorf("error parsing response: %w", err)
+	}
+
+	return &order, nil
 }
 
 func (bh *BinanceHandler) ValidateQuantity(symbol string, quantity float64) (string, error) {
@@ -707,327 +817,27 @@ func (bh *BinanceHandler) StartReentryMonitoring(symbol string, entryPrice float
 	bh.reentryMutex.Lock()
 	defer bh.reentryMutex.Unlock()
 
-	if bh.wsConn == nil {
-		if err := bh.connectWebSocket(); err != nil {
-			return err
-		}
+	if bh.fstream == nil {
+		bh.fstream = fstream.NewMarketStreamHandler("btcusdt", bh.logger, func(symbol string, price float64) {
+			fmt.Printf("New index price for %s: %.2f\n", symbol, price)
+		})
 	}
+	go bh.fstream.Start()
 
-	bh.reentryState[symbol] = &ReentryState{
-		Symbol:       symbol,
-		EntryPrice:   entryPrice,
-		Leverage:     leverage,
-		TP:           tp,
-		SL:           sl,
-		IsActive:     true,
-		OriginalSide: side,
+	order, err := bh.GetOrder("BTCUSDT", bh.executedOrders[0])
+	if err != nil {
+		log.Printf("Error getting order: %v", err)
+		return err
 	}
+	fmt.Printf("Order status: %s, executed quantity: %s\n", order.Status, order.ExecutedQty)
 
-	if !bh.isRunning {
-		bh.isRunning = true
-		go bh.websocketHandler()
-	}
+	// Wait for interrupt signal
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt)
+	<-c
 
-	// Subscribe to the symbol's trade stream
-	subscribeMsg := fmt.Sprintf(`{"method": "SUBSCRIBE", "params": ["%s@trade"], "id": 1}`, strings.ToLower(symbol))
-	if err := bh.wsConn.WriteMessage(websocket.TextMessage, []byte(subscribeMsg)); err != nil {
-		return fmt.Errorf("failed to subscribe to trade stream: %w", err)
-	}
+	// Clean shutdown
+	bh.fstream.Stop()
 
 	return nil
-}
-
-func (bh *BinanceHandler) connectWebSocket() error {
-	u := url.URL{Scheme: "wss", Host: "testnet.binancefuture.com", Path: "/ws-fapi/v1"}
-	c, _, err := websocket.DefaultDialer.Dial(u.String(), nil)
-	if err != nil {
-		return fmt.Errorf("failed to connect to WebSocket: %w", err)
-	}
-	bh.wsConn = c
-	bh.connectedSince = time.Now()
-	bh.authenticated = false
-
-	// Start ping ticker
-	bh.pingTicker = time.NewTicker(3 * time.Minute)
-	go bh.pingHandler()
-
-	return nil
-}
-
-func (bh *BinanceHandler) pingHandler() {
-	for {
-		select {
-		case <-bh.pingTicker.C:
-			if err := bh.wsConn.WriteMessage(websocket.PingMessage, []byte{}); err != nil {
-				log.Println("Failed to send ping:", err)
-				return
-			}
-		case <-bh.doneCh:
-			return
-		}
-	}
-}
-
-func (bh *BinanceHandler) websocketHandler() {
-	for bh.isRunning {
-		if err := bh.connectWebSocket(); err != nil {
-			log.Println("Failed to connect to WebSocket:", err)
-			time.Sleep(5 * time.Second)
-			continue
-		}
-
-		if err := bh.authenticate(); err != nil {
-			log.Println("Failed to authenticate WebSocket connection:", err)
-			bh.wsConn.Close()
-			time.Sleep(5 * time.Second)
-			continue
-		}
-
-		if err := bh.readMessages(); err != nil {
-			log.Println("WebSocket error:", err)
-			bh.wsConn.Close()
-			time.Sleep(5 * time.Second)
-		}
-	}
-}
-func (bh *BinanceHandler) generateEd25519Signature(payload string) string {
-	seed, err := hex.DecodeString(bh.secret)
-	if err != nil {
-		log.Printf("Error decoding secret key: %v", err)
-		return ""
-	}
-
-	if len(seed) != ed25519.SeedSize {
-		log.Printf("Invalid seed length. Expected %d, got %d", ed25519.SeedSize, len(seed))
-		return ""
-	}
-
-	// Generate the full private key from the seed
-	privateKey := ed25519.NewKeyFromSeed(seed)
-
-	// Sign the payload
-	signature := ed25519.Sign(privateKey, []byte(payload))
-	return hex.EncodeToString(signature)
-}
-
-func (bh *BinanceHandler) authenticate() error {
-	timestamp := time.Now().UnixMilli()
-
-	// Construct the payload string
-	// Sort parameters alphabetically: apiKey, timestamp
-	payload := fmt.Sprintf("apiKey=%s&timestamp=%d", bh.apiKey, timestamp)
-
-	// Generate the signature
-	signature := bh.generateEd25519Signature(payload)
-
-	authMsg := struct {
-		ID     string `json:"id"`
-		Method string `json:"method"`
-		Params struct {
-			APIKey    string `json:"apiKey"`
-			Signature string `json:"signature"`
-			Timestamp int64  `json:"timestamp"`
-		} `json:"params"`
-	}{
-		ID:     "auth",
-		Method: "session.logon",
-		Params: struct {
-			APIKey    string `json:"apiKey"`
-			Signature string `json:"signature"`
-			Timestamp int64  `json:"timestamp"`
-		}{
-			APIKey:    bh.apiKey,
-			Signature: signature,
-			Timestamp: timestamp,
-		},
-	}
-
-	jsonMsg, _ := json.Marshal(authMsg)
-	log.Printf("Sending authentication message: %s", string(jsonMsg))
-
-	if err := bh.wsConn.WriteJSON(authMsg); err != nil {
-		return fmt.Errorf("failed to send authentication message: %w", err)
-	}
-
-	_, msg, err := bh.wsConn.ReadMessage()
-	if err != nil {
-		return fmt.Errorf("failed to read authentication response: %w", err)
-	}
-
-	log.Printf("Received authentication response: %s", string(msg))
-
-	var response struct {
-		ID     string `json:"id"`
-		Status int    `json:"status"`
-		Result struct {
-			APIKey          string `json:"apiKey"`
-			AuthorizedSince int64  `json:"authorizedSince"`
-		} `json:"result"`
-		Error *struct {
-			Code int    `json:"code"`
-			Msg  string `json:"msg"`
-		} `json:"error,omitempty"`
-	}
-
-	if err := json.Unmarshal(msg, &response); err != nil {
-		return fmt.Errorf("failed to parse authentication response: %w", err)
-	}
-
-	if response.Status != 200 {
-		if response.Error != nil {
-			return fmt.Errorf("authentication failed: code=%d, msg=%s", response.Error.Code, response.Error.Msg)
-		}
-		return fmt.Errorf("authentication failed: %s", string(msg))
-	}
-
-	bh.authenticated = true
-	return nil
-}
-
-func (bh *BinanceHandler) readMessages() error {
-	for {
-		select {
-		case <-bh.doneCh:
-			return nil
-		default:
-			_, message, err := bh.wsConn.ReadMessage()
-			if err != nil {
-				if websocket.IsCloseError(err, websocket.CloseNormalClosure) {
-					return nil
-				}
-				return err
-			}
-
-			if bh.wsConn.PongHandler() != nil {
-				bh.lastPongTime = time.Now()
-			}
-
-			var wsMsg WSMessage
-			if err := json.Unmarshal(message, &wsMsg); err != nil {
-				log.Println("Failed to unmarshal WebSocket message:", err)
-				continue
-			}
-
-			if wsMsg.Data.E == "trade" {
-				bh.checkAndPlaceReentryOrder(wsMsg.Data.S, wsMsg.Data.P)
-			}
-		}
-	}
-}
-
-func (bh *BinanceHandler) handleWebSocketMessages() {
-	for {
-		_, message, err := bh.wsConn.ReadMessage()
-		if err != nil {
-			log.Println("WebSocket read error:", err)
-			return
-		}
-
-		var wsMsg WSMessage
-		if err := json.Unmarshal(message, &wsMsg); err != nil {
-			log.Println("Failed to unmarshal WebSocket message:", err)
-			continue
-		}
-
-		if wsMsg.Data.E == "trade" {
-			bh.checkAndPlaceReentryOrder(wsMsg.Data.S, wsMsg.Data.P)
-		}
-	}
-}
-
-func (bh *BinanceHandler) checkAndPlaceReentryOrder(symbol, priceStr string) {
-	price, err := strconv.ParseFloat(priceStr, 64)
-	if err != nil {
-		log.Println("Failed to parse price:", err)
-		return
-	}
-
-	bh.reentryMutex.Lock()
-	defer bh.reentryMutex.Unlock()
-
-	state, exists := bh.reentryState[symbol]
-	if !exists || !state.IsActive {
-		return
-	}
-
-	// Check if price has crossed the entry price
-	if (state.OriginalSide == "BUY" && price <= state.EntryPrice) ||
-		(state.OriginalSide == "SELL" && price >= state.EntryPrice) {
-		// Place re-entry order
-		if err := bh.placeReentryOrder(state); err != nil {
-			log.Println("Failed to place re-entry order:", err)
-			return
-		}
-		// Deactivate re-entry for this symbol
-		state.IsActive = false
-	}
-}
-
-func (bh *BinanceHandler) placeReentryOrder(state *ReentryState) error {
-	// Place main order
-	if err := bh.ExecuteMainOrder(&BinanceSignal{
-		Symbol:   state.Symbol,
-		Action:   state.OriginalSide,
-		Leverage: state.Leverage,
-		TP:       state.TP,
-		SL:       state.SL,
-	}, state.EntryPrice, ""); err != nil {
-		return fmt.Errorf("failed to place main re-entry order: %w", err)
-	}
-
-	// Place TP order
-	if err := bh.ExecuteTPOrder(&BinanceSignal{
-		Symbol:   state.Symbol,
-		Action:   state.OriginalSide,
-		Leverage: state.Leverage,
-		TP:       state.TP,
-		SL:       state.SL,
-	}, state.EntryPrice, ""); err != nil {
-		return fmt.Errorf("failed to place TP re-entry order: %w", err)
-	}
-
-	// Place SL order
-	if err := bh.ExecuteSLOrder(&BinanceSignal{
-		Symbol:   state.Symbol,
-		Action:   state.OriginalSide,
-		Leverage: state.Leverage,
-		TP:       state.TP,
-		SL:       state.SL,
-	}, state.EntryPrice, ""); err != nil {
-		return fmt.Errorf("failed to place SL re-entry order: %w", err)
-	}
-
-	return nil
-}
-
-// Add this method to stop monitoring for re-entry
-func (bh *BinanceHandler) StopReentryMonitoring(symbol string) {
-	bh.reentryMutex.Lock()
-	defer bh.reentryMutex.Unlock()
-
-	if state, exists := bh.reentryState[symbol]; exists {
-		state.IsActive = false
-	}
-
-	// Unsubscribe from the symbol's trade stream
-	unsubscribeMsg := fmt.Sprintf(`{"method": "UNSUBSCRIBE", "params": ["%s@trade"], "id": 1}`, strings.ToLower(symbol))
-	if err := bh.wsConn.WriteMessage(websocket.TextMessage, []byte(unsubscribeMsg)); err != nil {
-		log.Println("Failed to unsubscribe from trade stream:", err)
-	}
-}
-
-// Don't forget to close the WebSocket connection when you're done
-func (bh *BinanceHandler) CloseWebSocket() {
-	bh.reentryMutex.Lock()
-	defer bh.reentryMutex.Unlock()
-	bh.isRunning = false
-	if bh.doneCh != nil {
-		close(bh.doneCh)
-	}
-	if bh.pingTicker != nil {
-		bh.pingTicker.Stop()
-	}
-	if bh.wsConn != nil {
-		bh.wsConn.Close()
-	}
 }
