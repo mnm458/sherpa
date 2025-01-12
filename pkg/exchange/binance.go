@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"log/slog"
 	"math"
 	"net/http"
@@ -20,6 +19,8 @@ import (
 	"time"
 
 	"github.com/mnm458/sherpa/pkg/fstream"
+	"github.com/mnm458/sherpa/pkg/posmon"
+	"github.com/mnm458/sherpa/pkg/types"
 )
 
 const (
@@ -34,6 +35,7 @@ type BinanceSignal struct {
 	TP       float64
 	SL       float64
 }
+
 type ReentryState struct {
 	Symbol       string
 	EntryPrice   float64
@@ -43,34 +45,7 @@ type ReentryState struct {
 	IsActive     bool
 	OriginalSide string
 }
-type Order struct {
-	AvgPrice            string `json:"avgPrice"`
-	ClientOrderId       string `json:"clientOrderId"`
-	CumQuote            string `json:"cumQuote"`
-	ExecutedQty         string `json:"executedQty"`
-	OrderId             int64  `json:"orderId"`
-	OrigQty             string `json:"origQty"`
-	OrigType            string `json:"origType"`
-	Price               string `json:"price"`
-	ReduceOnly          bool   `json:"reduceOnly"`
-	Side                string `json:"side"`
-	PositionSide        string `json:"positionSide"`
-	Status              string `json:"status"`
-	StopPrice           string `json:"stopPrice"`
-	ClosePosition       bool   `json:"closePosition"`
-	Symbol              string `json:"symbol"`
-	Time                int64  `json:"time"`
-	TimeInForce         string `json:"timeInForce"`
-	Type                string `json:"type"`
-	ActivatePrice       string `json:"activatePrice"`
-	PriceRate           string `json:"priceRate"`
-	UpdateTime          int64  `json:"updateTime"`
-	WorkingType         string `json:"workingType"`
-	PriceProtect        bool   `json:"priceProtect"`
-	PriceMatch          string `json:"priceMatch"`
-	SelfTradePrevention string `json:"selfTradePreventionMode"`
-	GoodTillDate        int64  `json:"goodTillDate"`
-}
+
 type OrderResponse struct {
 	OrderId int64 `json:"orderId"`
 }
@@ -623,7 +598,7 @@ func (bh *BinanceHandler) ExecuteSLOrder(s *BinanceSignal, price float64, quanti
 	return nil
 }
 
-func (bh *BinanceHandler) GetOrder(symbol string, orderId int64) (*Order, error) {
+func (bh *BinanceHandler) GetOrder(symbol string, orderId int64) (*types.Order, error) {
 	endpoint := "/fapi/v1/order"
 
 	// Create parameters
@@ -667,7 +642,7 @@ func (bh *BinanceHandler) GetOrder(symbol string, orderId int64) (*Order, error)
 	}
 
 	// Parse response
-	var order Order
+	var order types.Order
 	if err := json.Unmarshal(body, &order); err != nil {
 		return nil, fmt.Errorf("error parsing response: %w", err)
 	}
@@ -814,8 +789,6 @@ func (bh *BinanceHandler) CancelAllOpenOrders(symbol string) error {
 }
 
 func (bh *BinanceHandler) StartReentryMonitoring(symbol string, entryPrice float64, leverage int64, tp, sl float64, side string) error {
-	bh.reentryMutex.Lock()
-	defer bh.reentryMutex.Unlock()
 
 	if bh.fstream == nil {
 		bh.fstream = fstream.NewMarketStreamHandler("btcusdt", bh.logger, func(symbol string, price float64) {
@@ -824,13 +797,13 @@ func (bh *BinanceHandler) StartReentryMonitoring(symbol string, entryPrice float
 	}
 	go bh.fstream.Start()
 
-	order, err := bh.GetOrder("BTCUSDT", bh.executedOrders[0])
-	if err != nil {
-		log.Printf("Error getting order: %v", err)
-		return err
-	}
-	fmt.Printf("Order status: %s, executed quantity: %s\n", order.Status, order.ExecutedQty)
-
+	monitor := posmon.NewPositionMonitor(bh, "BTCUSDT", bh.executedOrders[0], bh.executedOrders[1], bh.executedOrders[2], "0.1", bh.logger, func(outcome string) {
+		bh.logger.Info("Position closed",
+			"outcome", outcome,
+			"symbol", symbol,
+		)
+	})
+	_ = monitor
 	// Wait for interrupt signal
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt)

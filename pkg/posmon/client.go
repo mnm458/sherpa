@@ -4,15 +4,16 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/mnm458/sherpa/pkg/exchange"
+	"github.com/mnm458/sherpa/pkg/types"
 )
 
-type OrderStatusChecker interface {
-	GetOrder(symbol string, orderID int64) (*exchange.Order, error)
+type Order struct {
+	Status      string `json:"status"`
+	ExecutedQty string `json:"executedQty"`
 }
 
 type PositionMonitor struct {
-	orderChecker    OrderStatusChecker // Interface instead of *BinanceHandler
+	orderChecker    types.OrderStatusChecker // Interface instead of *BinanceHandler
 	symbol          string
 	entryOrderId    int64
 	tpOrderId       int64
@@ -24,7 +25,7 @@ type PositionMonitor struct {
 	onPositionClose func(outcome string)
 }
 
-func NewPositionMonitor(orderChecker OrderStatusChecker, symbol string, entryOrderID, tpOrderID, slOrderID int64, originalQty string, logger *slog.Logger, onPositionClose func(outcome string)) *PositionMonitor {
+func NewPositionMonitor(orderChecker types.OrderStatusChecker, symbol string, entryOrderID, tpOrderID, slOrderID int64, originalQty string, logger *slog.Logger, onPositionClose func(outcome string)) *PositionMonitor {
 	return &PositionMonitor{
 		orderChecker:    orderChecker,
 		symbol:          symbol,
