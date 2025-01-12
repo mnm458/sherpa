@@ -7,11 +7,6 @@ import (
 	"github.com/mnm458/sherpa/pkg/types"
 )
 
-type Order struct {
-	Status      string `json:"status"`
-	ExecutedQty string `json:"executedQty"`
-}
-
 type PositionMonitor struct {
 	orderChecker    types.OrderStatusChecker // Interface instead of *BinanceHandler
 	symbol          string

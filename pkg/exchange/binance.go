@@ -790,26 +790,43 @@ func (bh *BinanceHandler) CancelAllOpenOrders(symbol string) error {
 
 func (bh *BinanceHandler) StartReentryMonitoring(symbol string, entryPrice float64, leverage int64, tp, sl float64, side string) error {
 
+	// Start stream just for monitoring price (no action yet)
 	if bh.fstream == nil {
 		bh.fstream = fstream.NewMarketStreamHandler("btcusdt", bh.logger, func(symbol string, price float64) {
-			fmt.Printf("New index price for %s: %.2f\n", symbol, price)
+			bh.logger.Debug("Price update", "price", price) // Using debug level for frequent updates
 		})
 	}
 	go bh.fstream.Start()
 
-	monitor := posmon.NewPositionMonitor(bh, "BTCUSDT", bh.executedOrders[0], bh.executedOrders[1], bh.executedOrders[2], "0.1", bh.logger, func(outcome string) {
-		bh.logger.Info("Position closed",
-			"outcome", outcome,
-			"symbol", symbol,
-		)
-	})
-	_ = monitor
-	// Wait for interrupt signal
-	c := make(chan os.Signal, 1)
-	signal.Notify(c, os.Interrupt)
-	<-c
+	// Wait 10 seconds for stream to establish and stabilize
+	time.Sleep(10 * time.Second)
 
-	// Clean shutdown
+	// Create and start monitor with 10-second check interval
+	monitor := posmon.NewPositionMonitor(
+		bh,
+		symbol,
+		bh.executedOrders[0],
+		bh.executedOrders[1],
+		bh.executedOrders[2],
+		"0.1",
+		bh.logger,
+		func(outcome string) {
+			bh.logger.Info("Position closed",
+				"outcome", outcome,
+				"symbol", symbol,
+			)
+		},
+	)
+
+	go monitor.Start()
+
+	// Setup clean shutdown
+	done := make(chan os.Signal, 1)
+	signal.Notify(done, os.Interrupt)
+	<-done
+
+	bh.logger.Info("Shutting down monitoring")
+	monitor.Stop()
 	bh.fstream.Stop()
 
 	return nil
