@@ -7,32 +7,53 @@ import (
 	"github.com/mnm458/sherpa/pkg/types"
 )
 
+// MarketStreamChecker interface for checking reentry conditions
+
 type PositionMonitor struct {
-	orderChecker    types.OrderStatusChecker // Interface instead of *BinanceHandler
+	orderChecker    types.OrderStatusChecker
+	marketStream    types.MarketStreamChecker // Changed from pointer to interface
 	symbol          string
 	entryOrderId    int64
 	tpOrderId       int64
 	slOrderId       int64
 	originalQty     string
+	currentPrice    float64
+	side            string
 	ticker          *time.Ticker
 	done            chan struct{}
 	logger          *slog.Logger
 	onPositionClose func(outcome string)
 }
 
-func NewPositionMonitor(orderChecker types.OrderStatusChecker, symbol string, entryOrderID, tpOrderID, slOrderID int64, originalQty string, logger *slog.Logger, onPositionClose func(outcome string)) *PositionMonitor {
+func NewPositionMonitor(
+	orderChecker types.OrderStatusChecker,
+	marketStream types.MarketStreamChecker,
+	symbol string,
+	entryOrderID, tpOrderID, slOrderID int64,
+	originalQty string,
+	side string,
+	currentPrice float64,
+	logger *slog.Logger,
+	onPositionClose func(outcome string),
+) *PositionMonitor {
 	return &PositionMonitor{
 		orderChecker:    orderChecker,
+		marketStream:    marketStream,
 		symbol:          symbol,
 		entryOrderId:    entryOrderID,
 		tpOrderId:       tpOrderID,
 		slOrderId:       slOrderID,
 		originalQty:     originalQty,
+		side:            side,
+		currentPrice:    currentPrice,
 		ticker:          time.NewTicker(10 * time.Second),
 		done:            make(chan struct{}),
 		logger:          logger,
 		onPositionClose: onPositionClose,
 	}
+}
+func (pm *PositionMonitor) UpdateCurrentPrice(price float64) {
+	pm.currentPrice = price
 }
 
 func (pm *PositionMonitor) isOrderFilled(orderId int64) (bool, error) {
@@ -58,6 +79,9 @@ func (pm *PositionMonitor) Start() {
 				}
 
 				if filled {
+					pm.logger.Info("Entry order filled, starting outcome monitoring",
+						"orderId", pm.entryOrderId,
+						"symbol", pm.symbol)
 					// Entry order is filled, start monitoring TP/SL
 					pm.monitorOutcome()
 					return
@@ -68,6 +92,11 @@ func (pm *PositionMonitor) Start() {
 }
 
 func (pm *PositionMonitor) monitorOutcome() {
+	pm.logger.Info("Starting outcome monitoring",
+		"symbol", pm.symbol,
+		"side", pm.side,
+		"currentPrice", pm.currentPrice)
+
 	for {
 		select {
 		case <-pm.done:
@@ -80,12 +109,20 @@ func (pm *PositionMonitor) monitorOutcome() {
 				continue
 			}
 
+			// Log TP check result
+			pm.logger.Debug("Checking TP order",
+				"orderId", pm.tpOrderId,
+				"filled", tpFilled)
+
 			if tpFilled {
+				pm.logger.Info("TP order filled - Position won",
+					"orderId", pm.tpOrderId,
+					"symbol", pm.symbol,
+					"side", pm.side)
 				if pm.onPositionClose != nil {
 					pm.onPositionClose("Win")
 				}
-				pm.Stop()
-				return
+				continue
 			}
 
 			// Check SL order
@@ -95,7 +132,16 @@ func (pm *PositionMonitor) monitorOutcome() {
 				continue
 			}
 
+			// Log SL check result
+			pm.logger.Debug("Checking SL order",
+				"orderId", pm.slOrderId,
+				"filled", slFilled)
+
 			if slFilled {
+				pm.logger.Info("SL order filled - Position lost",
+					"orderId", pm.slOrderId,
+					"symbol", pm.symbol,
+					"side", pm.side)
 				if pm.onPositionClose != nil {
 					pm.onPositionClose("Loss")
 				}

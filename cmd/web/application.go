@@ -14,8 +14,9 @@ type application struct {
 }
 
 func NewApplication(ctx context.Context, logger *slog.Logger) *application {
-	bh, err := exchange.NewExchangeHandler("binance", "ak", "secret")
+	bh, err := exchange.NewExchangeHandler("binance", "apikey", "secret", logger)
 	if err != nil {
+		logger.Error(err.Error())
 		return nil
 	}
 	return &application{

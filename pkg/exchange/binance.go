@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/mnm458/sherpa/pkg/fstream"
@@ -98,6 +99,7 @@ type BinanceHandler struct {
 	doneCh         chan struct{}
 	logger         *slog.Logger
 	executedOrders *[3]int64
+	currentMonitor *posmon.PositionMonitor
 }
 
 func NewBinanceHandler(apiKey string, secret string, logger *slog.Logger) *BinanceHandler {
@@ -171,7 +173,7 @@ func (bh *BinanceHandler) Process(s Signal) error {
 		return err
 	}
 
-	err = bh.StartReentryMonitoring(binanceSignal.Symbol, price, binanceSignal.Leverage, binanceSignal.TP, binanceSignal.SL, binanceSignal.Action)
+	err = bh.StartReentryMonitoring(binanceSignal)
 	if err != nil {
 		bh.logger.Error("Failed to start re-entry monitoring", "symbol", binanceSignal.Symbol, "error", err)
 	}
@@ -788,46 +790,133 @@ func (bh *BinanceHandler) CancelAllOpenOrders(symbol string) error {
 	return nil
 }
 
-func (bh *BinanceHandler) StartReentryMonitoring(symbol string, entryPrice float64, leverage int64, tp, sl float64, side string) error {
+func (bh *BinanceHandler) StartReentryMonitoring(bsignal BinanceSignal) error {
+	var currentPrice float64
 
-	// Start stream just for monitoring price (no action yet)
+	// Get initial price
+	price, err := bh.FetchCurrPrice(bsignal.Symbol)
+	if err != nil {
+		return fmt.Errorf("failed to fetch initial price: %w", err)
+	}
+	currentPrice = price
+
+	// Initialize or get reentry state
+	bh.reentryMutex.Lock()
+	if _, exists := bh.reentryState[bsignal.Symbol]; !exists {
+		bh.reentryState[bsignal.Symbol] = &ReentryState{
+			Symbol:       bsignal.Symbol,
+			EntryPrice:   currentPrice, // Now using valid initial price
+			Leverage:     bsignal.Leverage,
+			TP:           bsignal.TP,
+			SL:           bsignal.SL,
+			IsActive:     true,
+			OriginalSide: bsignal.Action,
+		}
+	}
+	bh.reentryMutex.Unlock()
+
+	// Start stream for monitoring price
 	if bh.fstream == nil {
-		bh.fstream = fstream.NewMarketStreamHandler("btcusdt", bh.logger, func(symbol string, price float64) {
-			bh.logger.Debug("Price update", "price", price) // Using debug level for frequent updates
+		bh.fstream = fstream.NewMarketStreamHandler(bsignal.Symbol, bh.logger, func(symbol string, price float64) {
+			currentPrice = price
+
+			if bh.currentMonitor != nil {
+				bh.currentMonitor.UpdateCurrentPrice(price)
+			}
+
+			bh.logger.Debug("Price update",
+				"symbol", symbol,
+				"price", price,
+				"side", bsignal.Action)
 		})
+
+		// Set custom reentry checker
+		bh.fstream.ReentryChecker = func(price float64, conditions types.ReentryConditions) bool {
+			bh.reentryMutex.Lock()
+			defer bh.reentryMutex.Unlock()
+
+			state, exists := bh.reentryState[conditions.Symbol]
+			if !exists || !state.IsActive {
+				return false
+			}
+
+			if state.OriginalSide == "BUY" {
+				stopCondition := price >= state.SL
+				tpCondition := price <= state.TP*0.9
+				return stopCondition && tpCondition
+			} else {
+				stopCondition := price <= state.SL
+				tpCondition := price >= state.TP*1.1
+				return stopCondition && tpCondition
+			}
+		}
 	}
 	go bh.fstream.Start()
 
-	// Wait 10 seconds for stream to establish and stabilize
+	// Wait for stream to stabilize
 	time.Sleep(10 * time.Second)
 
-	// Create and start monitor with 10-second check interval
+	// Get the quantity from the executed orders
+	order, err := bh.GetOrder(bsignal.Symbol, bh.executedOrders[0])
+	if err != nil {
+		return fmt.Errorf("failed to get entry order details: %w", err)
+	}
+
+	// Create and start monitor
 	monitor := posmon.NewPositionMonitor(
-		bh,
-		symbol,
-		bh.executedOrders[0],
-		bh.executedOrders[1],
-		bh.executedOrders[2],
-		"0.1",
-		bh.logger,
+		bh,                   // OrderStatusChecker
+		bh.fstream,           // MarketStreamChecker
+		bsignal.Symbol,       // symbol
+		bh.executedOrders[0], // entryOrderID
+		bh.executedOrders[1], // tpOrderID
+		bh.executedOrders[2], // slOrderID
+		order.ExecutedQty,    // originalQty from the executed order
+		bsignal.Action,       // side (BUY/SELL)
+		currentPrice,         // currentPrice
+		bh.logger,            // logger
 		func(outcome string) {
 			bh.logger.Info("Position closed",
 				"outcome", outcome,
-				"symbol", symbol,
-			)
+				"symbol", bsignal.Symbol,
+				"side", bsignal.Action,
+				"price", currentPrice)
+
+			bh.reentryMutex.Lock()
+			if state, exists := bh.reentryState[bsignal.Symbol]; exists {
+				if outcome == "Loss" {
+					state.IsActive = false
+					bh.logger.Info("Disabling reentry due to loss",
+						"symbol", bsignal.Symbol)
+				}
+			}
+			bh.reentryMutex.Unlock()
 		},
 	)
 
+	bh.currentMonitor = monitor
 	go monitor.Start()
 
 	// Setup clean shutdown
-	done := make(chan os.Signal, 1)
-	signal.Notify(done, os.Interrupt)
-	<-done
+	stopCh := make(chan struct{})
+	go func() {
+		// Setup signal handling
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 
-	bh.logger.Info("Shutting down monitoring")
-	monitor.Stop()
-	bh.fstream.Stop()
+		select {
+		case <-sigCh:
+			bh.logger.Info("Received shutdown signal")
+		case <-stopCh:
+			bh.logger.Info("Monitoring stopped")
+		}
+
+		// Clean shutdown
+		bh.logger.Info("Initiating shutdown sequence")
+		monitor.Stop()
+		if bh.fstream != nil {
+			bh.fstream.Stop()
+		}
+	}()
 
 	return nil
 }

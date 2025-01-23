@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/mnm458/sherpa/pkg/types"
 )
 
 type MarkPriceData struct {
@@ -23,6 +24,12 @@ type MarkPriceData struct {
 	NextFunding int64  `json:"T"`
 }
 
+type ReentryConditions struct {
+	stopPrice float64
+	side      string // "BUY" or "SELL"
+	symbol    string
+}
+
 type MarketStreamHandler struct {
 	wsConn         *websocket.Conn
 	symbol         string
@@ -30,15 +37,28 @@ type MarketStreamHandler struct {
 	logger         *slog.Logger
 	pingTicker     *time.Ticker
 	connectedSince time.Time
+	onPrice        func(string, float64)
 	onIndexPrice   func(symbol string, price float64) // Callback for index price updates
+	ReentryChecker func(price float64, conditions types.ReentryConditions) bool
 }
 
-func NewMarketStreamHandler(symbol string, logger *slog.Logger, onIndexPrice func(string, float64)) *MarketStreamHandler {
+func NewMarketStreamHandler(symbol string, logger *slog.Logger, onPrice func(string, float64)) *MarketStreamHandler {
 	return &MarketStreamHandler{
-		symbol:       strings.ToLower(symbol),
-		logger:       logger,
-		isRunning:    true,
-		onIndexPrice: onIndexPrice,
+		symbol:    strings.ToLower(symbol),
+		logger:    logger,
+		isRunning: true,
+		onPrice:   onPrice,
+		ReentryChecker: func(price float64, conditions types.ReentryConditions) bool {
+			if conditions.Side == "BUY" {
+				stopCondition := price >= conditions.StopPrice
+				tpCondition := price <= conditions.StopPrice*0.9
+				return stopCondition && tpCondition
+			} else {
+				stopCondition := price <= conditions.StopPrice
+				tpCondition := price >= conditions.StopPrice*1.1
+				return stopCondition && tpCondition
+			}
+		},
 	}
 }
 func (msh *MarketStreamHandler) connectWebSocket() error {
@@ -85,7 +105,6 @@ func (msh *MarketStreamHandler) readMessages() error {
 		msh.handleMessage(message)
 	}
 }
-
 func (msh *MarketStreamHandler) handleMessage(message []byte) {
 	var data MarkPriceData
 	if err := json.Unmarshal(message, &data); err != nil {
@@ -93,19 +112,24 @@ func (msh *MarketStreamHandler) handleMessage(message []byte) {
 		return
 	}
 
-	// Convert index price string to float64
-	indexPrice, err := strconv.ParseFloat(data.IndexPrice, 64)
+	// Convert mark price string to float64
+	markPrice, err := strconv.ParseFloat(data.MarkPrice, 64)
 	if err != nil {
-		msh.logger.Error("Failed to parse index price", "error", err, "price", data.IndexPrice)
+		msh.logger.Error("Failed to parse mark price", "error", err, "price", data.MarkPrice)
 		return
 	}
 
-	// Call the callback with the index price
-	if msh.onIndexPrice != nil {
-		msh.onIndexPrice(data.Symbol, indexPrice)
+	// Log every price update with debug level
+	msh.logger.Debug("Received mark price update",
+		"symbol", data.Symbol,
+		"price", markPrice,
+		"time", time.Unix(0, data.EventTime*int64(time.Millisecond)))
+
+	// Call the callback with the price
+	if msh.onPrice != nil {
+		msh.onPrice(data.Symbol, markPrice)
 	}
 }
-
 func (msh *MarketStreamHandler) Start() {
 	for msh.isRunning {
 		if err := msh.connectWebSocket(); err != nil {
@@ -130,4 +154,11 @@ func (msh *MarketStreamHandler) Stop() {
 	if msh.wsConn != nil {
 		msh.wsConn.Close()
 	}
+}
+
+func (msh *MarketStreamHandler) CheckReentryConditions(price float64, conditions types.ReentryConditions) bool {
+	if msh.ReentryChecker != nil {
+		return msh.ReentryChecker(price, conditions)
+	}
+	return false
 }

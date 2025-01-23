@@ -32,3 +32,18 @@ type Order struct {
 type OrderStatusChecker interface {
 	GetOrder(symbol string, orderId int64) (*Order, error)
 }
+
+type OrderPlacer interface {
+	PlaceReentryOrders(symbol string, side string, price float64) error
+}
+
+type ReentryConditions struct {
+	StopPrice float64
+	Side      string
+	Symbol    string
+}
+
+// MarketStreamChecker interface for checking reentry conditions
+type MarketStreamChecker interface {
+	CheckReentryConditions(price float64, conditions ReentryConditions) bool
+}
