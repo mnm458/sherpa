@@ -3,6 +3,7 @@ package exchange
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -128,22 +129,21 @@ func (bh *BybitHandler) Process(s Signal) error {
 		return priceErr
 	}
 
-	qty := bh.calculateQuantity(balance, price, int32(bs.GetLeverage()))
+	qty := bh.calculateQuantity(balance, price, int32(bs.Leverage))
 
 	levErr := bh.setLeverage(&bs)
 	if levErr != nil {
 		return levErr
 	}
 
-	finalPrice, tpPrice, slPrice, calcErr := bh.calculateTPSLPrice(price, &bs)
+	finalPrice, tpPrice, slPrice, precision, calcErr := bh.calculateTPSLPrice(price, &bs)
 	if calcErr != nil {
 		bh.logger.Error("[BybitHandler] Failed calculate final prices", "error", calcErr)
 		return calcErr
 	}
 
-	orderID, orderErr := bh.placeOrder(&bs, qty, finalPrice, tpPrice, slPrice)
+	orderID, orderErr := bh.placeOrder(&bs, qty, finalPrice, tpPrice, slPrice, precision)
 	if orderErr != nil {
-		bh.logger.Info("[BybitHandler] Failed to place order", "error", orderErr)
 		return orderErr
 	}
 	bh.logger.Info("[BybitHandler] Order placed successfull", "orderID", orderID)
@@ -152,59 +152,66 @@ func (bh *BybitHandler) Process(s Signal) error {
 }
 
 func (bh *BybitHandler) setLeverage(signal *BybitSignal) error {
+	leverageStr := strconv.FormatInt(signal.Leverage, 10)
 	params := map[string]interface{}{
 		"category":     signal.Category,
 		"symbol":       signal.Symbol,
-		"buyLeverage":  signal.Leverage,
-		"sellLeverage": signal.Leverage,
+		"buyLeverage":  leverageStr,
+		"sellLeverage": leverageStr,
 	}
 	res, err := bh.client.NewUtaBybitServiceWithParams(params).SetPositionLeverage(bh.ctx)
 	if err != nil {
 		return err
 	}
+
 	if res.RetCode != 0 || res.RetMsg != "OK" {
-		return types.ErrInvalidServerResp
+		if res.RetCode == 110043 {
+			return nil
+		}
+		jsonData, _ := json.Marshal(res)
+
+		bh.logger.Error("[BybitHandler] failed to set leverage", "jsondata", string(jsonData))
+		return errors.New("failed to set leverage")
 	}
 	return nil
 }
 
-func (bh *BybitHandler) placeOrder(signal *BybitSignal, quantity float64, finalPrice float64, tpPrice float64, slPrice float64) (int64, error) {
+func (bh *BybitHandler) placeOrder(signal *BybitSignal, quantity float64, finalPrice float64, tpPrice float64, slPrice float64, precision int64) (string, error) {
 	params := map[string]interface{}{
-		"category":    signal.Category,
-		"symbol":      signal.Symbol,
-		"side":        signal.Side,
-		"orderType":   signal.OrderType,
-		"qty":         quantity,
-		"price":       finalPrice,
-		"timeInForce": signal.TimeInForce,
-		"takeProfit":  tpPrice,
-		"stopLoss":    slPrice,
+		"category":   signal.Category,
+		"symbol":     signal.Symbol,
+		"side":       signal.Side,
+		"orderType":  signal.OrderType,
+		"qty":        strconv.FormatFloat(quantity, 'f', 3, 64),
+		"price":      strconv.FormatFloat(finalPrice, 'f', int(precision), 64),
+		"takeProfit": strconv.FormatFloat(tpPrice, 'f', int(precision), 64),
+		"stopLoss":   strconv.FormatFloat(slPrice, 'f', int(precision), 64),
 	}
+	fmt.Println("PARAMS: ", params)
 	res, orderErr := bh.client.NewUtaBybitServiceWithParams(params).PlaceOrder(bh.ctx)
 	if orderErr != nil {
-		return 0, orderErr
+		return "", orderErr
 	}
 	var serverResp types.ByBitOrderResponse
 	if res.RetCode != 0 || res.RetMsg != "OK" {
-		return 0, types.ErrInvalidServerResp
+		jsonData, _ := json.Marshal(res)
+
+		bh.logger.Error("[BybitHandler] failed to place order", "jsondata", string(jsonData))
+		return "", errors.New("failed to place order")
 	}
 	jsonData, marshErr := json.Marshal(res)
 	if marshErr != nil {
-		return 0, marshErr
+		return "", marshErr
 	}
 
 	if unmarshalErr := json.Unmarshal(jsonData, &serverResp); unmarshalErr != nil {
-		return 0, unmarshalErr
+		return "", unmarshalErr
 	}
-	orderID, parseErr := strconv.ParseInt(serverResp.Result.OrderId, 10, 64)
-	if parseErr != nil {
-		return 0, parseErr
-	}
-	return orderID, nil
+	return serverResp.Result.OrderId, nil
 
 }
 
-func (bh *BybitHandler) calculateTPSLPrice(price float64, signal *BybitSignal) (float64, float64, float64, error) {
+func (bh *BybitHandler) calculateTPSLPrice(price float64, signal *BybitSignal) (float64, float64, float64, int64, error) {
 	var tpPrice float64
 	var slPrice float64
 	switch signal.Side {
@@ -215,28 +222,28 @@ func (bh *BybitHandler) calculateTPSLPrice(price float64, signal *BybitSignal) (
 		tpPrice = price * (1 - signal.TP)
 		slPrice = price * (1 + signal.SL)
 	default:
-		return 0, 0, 0, errUnsupportedSide
+		return 0, 0, 0, 0, errUnsupportedSide
 	}
 	params := map[string]interface{}{"category": signal.Category, "symbol": signal.Symbol}
 	res, resErr := bh.client.NewClassicalBybitServiceWithParams(params).GetInstrumentInfo(bh.ctx)
 	if resErr != nil {
-		return 0, 0, 0, resErr
+		return 0, 0, 0, 0, resErr
 	}
 	serverResp, extractErr := util.ExtractResponse(res)
 	if extractErr != nil {
-		return 0, 0, 0, extractErr
+		return 0, 0, 0, 0, extractErr
 	}
 	precision, precErr := strconv.ParseInt(serverResp.Result.List[0].PriceScale, 10, 64)
 	if precErr != nil {
-		return 0, 0, 0, precErr
+		return 0, 0, 0, 0, precErr
 	}
-	return util.RoundToDecimals(price, precision), util.RoundToDecimals(tpPrice, precision), util.RoundToDecimals(slPrice, precision), nil
+	return util.RoundToDecimals(price, precision), util.RoundToDecimals(tpPrice, precision), util.RoundToDecimals(slPrice, precision), precision, nil
 
 }
 
 func (bh *BybitHandler) calculateQuantity(balance float64, price float64, leverage int32) float64 {
 	availBalance := EQUITY_PERCENTAGE * balance
-	result := math.Floor((float64(leverage) * availBalance) / price)
+	result := math.Floor(((float64(leverage)*availBalance)/price)*1000) / 1000
 	return result
 }
 
@@ -268,12 +275,20 @@ func (bh *BybitHandler) GetWalletBalance() (float64, error) {
 	if err != nil {
 		return 0, err
 	}
-	serverResp, extractErr := util.ExtractResponse(res)
-	if extractErr != nil {
-		return 0, extractErr
+	var serverResp types.BybitBalanceResponse
+	if res.RetCode != 0 || res.RetMsg != "OK" {
+		return 0, errors.New("failed to get balance")
+	}
+	jsonData, marshErr := json.Marshal(res)
+	if marshErr != nil {
+		return 0, marshErr
 	}
 
-	totalBlanace, err := strconv.ParseFloat(serverResp.Result.List[0].TotalAvailableBalance, 64)
+	if unmarshalErr := json.Unmarshal(jsonData, &serverResp); unmarshalErr != nil {
+		return 0, unmarshalErr
+	}
+
+	totalBlanace, err := strconv.ParseFloat(serverResp.Result.List[0].Coin[0].WalletBalance, 64)
 	if err != nil {
 		return 0, err
 	}

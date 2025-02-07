@@ -21,7 +21,6 @@ func ExtractResponse(res *bybitClib.ServerResponse) (*types.BybitServerResponse,
 	if marshErr != nil {
 		return &serverResp, marshErr
 	}
-
 	if err := json.Unmarshal(jsonData, &serverResp); err != nil {
 		return &serverResp, err
 	}

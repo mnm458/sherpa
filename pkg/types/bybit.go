@@ -5,9 +5,19 @@ import "errors"
 type BybitServerResponse struct {
 	Result struct {
 		List []struct {
-			TotalAvailableBalance string `json:"totalAvailableBalance"`
-			LastPrice             string `json:"lastPrice"`
-			PriceScale            string `json:"priceScale"`
+			WalletBalance string `json:"walletBalance"`
+			LastPrice     string `json:"lastPrice"`
+			PriceScale    string `json:"priceScale"`
+		} `json:"list"`
+	} `json:"result"`
+}
+
+type BybitBalanceResponse struct {
+	Result struct {
+		List []struct {
+			Coin []struct {
+				WalletBalance string `json:"walletBalance"`
+			} `json:"coin"`
 		} `json:"list"`
 	} `json:"result"`
 }

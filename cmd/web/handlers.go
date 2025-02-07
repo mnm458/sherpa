@@ -18,7 +18,10 @@ func (app *application) testBinance(w http.ResponseWriter, r *http.Request) {
 		OrderType:   "Limit",
 		Side:        "Buy",
 		Symbol:      "BTCUSDT",
+		Leverage:    5,
 		PositionIdx: 0,
+		TP:          0.001,
+		SL:          0.0019,
 	})
 	if err != nil {
 		fmt.Println(err)
