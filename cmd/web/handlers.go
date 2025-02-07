@@ -13,7 +13,7 @@ func ping(w http.ResponseWriter, r *http.Request) {
 }
 
 func (app *application) testBinance(w http.ResponseWriter, r *http.Request) {
-	err := app.binanceHandler.Process(exchange.BinanceSignal{
+	err := app.exchangeHandler.Process(exchange.BinanceSignal{
 		Symbol:   "BTCUSDT",
 		Type:     "open",
 		Action:   "BUY",

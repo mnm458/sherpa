@@ -3,6 +3,8 @@ package exchange
 import (
 	"errors"
 	"log/slog"
+
+	"github.com/mnm458/sherpa/pkg/types"
 )
 
 type Signal interface {
@@ -20,12 +22,13 @@ type ExchangeStrategy interface {
 	Process(Signal) error
 }
 
-func NewExchangeHandler(exchangeType string, apiKey string, secret string, baseURL string, logger *slog.Logger) (ExchangeStrategy, error) {
+func NewExchangeHandler(exchangeType string, apiKey string, secret string, stage types.Environment, logger *slog.Logger) (ExchangeStrategy, error) {
 	switch exchangeType {
 	case "binance":
+		//TODO: add stage to this handler
 		return NewBinanceHandler(apiKey, secret, logger), nil
 	case "bybit":
-		return NewBybitHandler(apiKey, secret), nil
+		return NewBybitHandler(apiKey, secret, stage, logger), nil
 	default:
 		return nil, errors.New("unsupported exchange")
 	}

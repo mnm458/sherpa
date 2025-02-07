@@ -8,6 +8,7 @@ import (
 
 	"github.com/joho/godotenv"
 	"github.com/mnm458/sherpa/pkg/exchange"
+	"github.com/mnm458/sherpa/pkg/types"
 )
 
 const (
@@ -34,11 +35,18 @@ type application struct {
 }
 
 func NewApplication(ctx context.Context, exchangeName string, stage string, logger *slog.Logger) *application {
-	var baseUrl string
 	var apiKey string
 	var secret string
 	exchangeName = strings.ToLower(exchangeName)
-	stage = strings.ToLower(stage)
+	stage = strings.ToUpper(stage)
+	var environment types.Environment
+	if stage == "TEST" {
+		environment = types.TEST
+	} else if stage == "PROD" {
+		environment = types.PROD
+	} else {
+		panic("invalid stage environment")
+	}
 
 	err := godotenv.Load(".env")
 	if err != nil {
@@ -48,11 +56,9 @@ func NewApplication(ctx context.Context, exchangeName string, stage string, logg
 	case "binance":
 		switch stage {
 		case TEST_ENV:
-			baseUrl = os.Getenv(BINANCE_BASE_URL_TEST)
 			apiKey = os.Getenv(BINANCE_API_KEY_TEST)
 			secret = os.Getenv(BINANCE_SECRET_TEST)
 		case PROD_ENV:
-			baseUrl = os.Getenv(BINANCE_BASE_URL_PROD)
 			apiKey = os.Getenv(BINANCE_API_KEY_PROD)
 			secret = os.Getenv(BINANCE_SECRET_PROD)
 		default:
@@ -61,11 +67,9 @@ func NewApplication(ctx context.Context, exchangeName string, stage string, logg
 	case "bybit":
 		switch stage {
 		case TEST_ENV:
-			baseUrl = os.Getenv(BYBIT_BASE_URL_TEST)
 			apiKey = os.Getenv(BYBIT_API_KEY_TEST)
 			secret = os.Getenv(BYBIT_SECRET_TEST)
 		case PROD_ENV:
-			baseUrl = os.Getenv(BYBIT_BASE_URL_PROD)
 			apiKey = os.Getenv(BYBIT_API_KEY_PROD)
 			secret = os.Getenv(BYBIT_SECRET_PROD)
 		default:
@@ -75,11 +79,11 @@ func NewApplication(ctx context.Context, exchangeName string, stage string, logg
 		panic("unsupported exchange")
 	}
 
-	if baseUrl == "" || apiKey == "" || secret == "" {
+	if apiKey == "" || secret == "" {
 		panic("invalid credentials")
 	}
 
-	eh, err := exchange.NewExchangeHandler(exchangeName, apiKey, secret, baseUrl, logger)
+	eh, err := exchange.NewExchangeHandler(exchangeName, apiKey, secret, environment, logger)
 	if err != nil {
 		logger.Error(err.Error())
 		return nil
