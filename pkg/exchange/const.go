@@ -8,9 +8,8 @@ const (
 )
 
 var (
-	errInvalidSignal              = errors.New("invalid signal")
-	errInvalidSide                = errors.New("invalid side")
-	errInvalidServerResp          = errors.New("invalid wallet balance response")
-	errWalletRespUnmarshalFailure = errors.New("failed to unmarshal wallet server response")
-	errPriceRespUnmarshalFailure  = errors.New("failed to unmarshal price server response")
+	errInvalidSignal             = errors.New("invalid signal")
+	errInvalidSide               = errors.New("invalid side")
+	errPriceRespUnmarshalFailure = errors.New("failed to unmarshal price server response")
+	errUnsupportedSide           = errors.New("unsupported side, only Buy or Sell valid")
 )

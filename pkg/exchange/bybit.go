@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math"
 	"strconv"
 
 	"github.com/mnm458/sherpa/pkg/types"
+	"github.com/mnm458/sherpa/pkg/util"
 	bybitClib "github.com/wuhewuhe/bybit.go.api"
 )
 
@@ -16,15 +18,6 @@ type BybitHandler struct {
 	// websockClient *bybitClib.WebSocket
 	ctx    context.Context
 	logger *slog.Logger
-}
-
-type ServerResponse struct {
-	Result struct {
-		List []struct {
-			TotalAvailableBalance string `json:"totalAvailableBalance"`
-			LastPrice             string `json:"lastPrice"`
-		} `json:"list"`
-	} `json:"result"`
 }
 
 type BybitSignal struct {
@@ -130,13 +123,98 @@ func (bh *BybitHandler) Process(s Signal) error {
 
 	price, priceErr := bh.GetCurrPrice(bs.Category, bs.Symbol)
 	if priceErr != nil {
-		bh.logger.Error("[BybitHandler] Failed to get price", "error", balanceErr)
+		bh.logger.Error("[BybitHandler] Failed to get price", "error", priceErr)
 		return priceErr
 	}
-	_, _ = balance, price
-	return nil
-	// qty, qtyErr := bh.calculateQuantity(balance)
 
+	qty := bh.calculateQuantity(balance, price, int32(bs.GetLeverage()))
+
+	finalPrice, tpPrice, slPrice, calcErr := bh.calculateTPSLPrice(price, &bs)
+	if calcErr != nil {
+		bh.logger.Error("[BybitHandler] Failed calculate final prices", "error", calcErr)
+		return calcErr
+	}
+
+	orderID, orderErr := bh.placeOrder(&bs, qty, finalPrice, tpPrice, slPrice)
+	if orderErr != nil {
+		bh.logger.Info("[BybitHandler] Failed to place order", "error", orderErr)
+		return orderErr
+	}
+	bh.logger.Info("[BybitHandler] Order placed successfull", "orderID", orderID)
+
+	return nil
+}
+
+func (bh *BybitHandler) placeOrder(signal *BybitSignal, quantity float64, finalPrice float64, tpPrice float64, slPrice float64) (int64, error) {
+	params := map[string]interface{}{
+		"category":    signal.Category,
+		"symbol":      signal.Symbol,
+		"side":        signal.Side,
+		"orderType":   signal.OrderType,
+		"qty":         quantity,
+		"price":       finalPrice,
+		"timeInForce": signal.TimeInForce,
+		"takeProfit":  tpPrice,
+		"stopLoss":    slPrice,
+	}
+	res, orderErr := bh.client.NewUtaBybitServiceWithParams(params).PlaceOrder(bh.ctx)
+	if orderErr != nil {
+		return 0, orderErr
+	}
+	var serverResp types.ByBitOrderResponse
+	if res.RetCode != 0 || res.RetMsg != "OK" {
+		return 0, types.ErrInvalidServerResp
+	}
+	jsonData, marshErr := json.Marshal(res)
+	if marshErr != nil {
+		return 0, marshErr
+	}
+
+	if unmarshalErr := json.Unmarshal(jsonData, &serverResp); unmarshalErr != nil {
+		return 0, unmarshalErr
+	}
+	orderID, parseErr := strconv.ParseInt(serverResp.Result.OrderId, 10, 64)
+	if parseErr != nil {
+		return 0, parseErr
+	}
+	return orderID, nil
+
+}
+
+func (bh *BybitHandler) calculateTPSLPrice(price float64, signal *BybitSignal) (float64, float64, float64, error) {
+	var tpPrice float64
+	var slPrice float64
+	switch signal.Side {
+	case "Buy":
+		tpPrice = price * (1 + signal.TP)
+		slPrice = price * (1 - signal.SL)
+	case "Sell":
+		tpPrice = price * (1 - signal.TP)
+		slPrice = price * (1 + signal.SL)
+	default:
+		return 0, 0, 0, errUnsupportedSide
+	}
+	params := map[string]interface{}{"category": signal.Category, "symbol": signal.Symbol}
+	res, resErr := bh.client.NewClassicalBybitServiceWithParams(params).GetInstrumentInfo(bh.ctx)
+	if resErr != nil {
+		return 0, 0, 0, resErr
+	}
+	serverResp, extractErr := util.ExtractResponse(res)
+	if extractErr != nil {
+		return 0, 0, 0, extractErr
+	}
+	precision, precErr := strconv.ParseInt(serverResp.Result.List[0].PriceScale, 10, 64)
+	if precErr != nil {
+		return 0, 0, 0, precErr
+	}
+	return util.RoundToDecimals(price, precision), util.RoundToDecimals(tpPrice, precision), util.RoundToDecimals(slPrice, precision), nil
+
+}
+
+func (bh *BybitHandler) calculateQuantity(balance float64, price float64, leverage int32) float64 {
+	availBalance := EQUITY_PERCENTAGE * balance
+	result := math.Floor((float64(leverage) * availBalance) / price)
+	return result
 }
 
 func (bh *BybitHandler) GetCurrPrice(category string, symbol string) (float64, error) {
@@ -148,19 +226,11 @@ func (bh *BybitHandler) GetCurrPrice(category string, symbol string) (float64, e
 	if err != nil {
 		return 0, err
 	}
-	if res.RetCode != 0 || res.RetMsg != "OK" {
-		return 0, errInvalidServerResp
+	serverResp, extractErr := util.ExtractResponse(res)
+	if extractErr != nil {
+		return 0, extractErr
 	}
 
-	jsonData, marshErr := json.Marshal(res)
-	if marshErr != nil {
-		return 0, err
-	}
-
-	var serverResp ServerResponse
-	if err := json.Unmarshal(jsonData, &serverResp); err != nil {
-		return 0, errPriceRespUnmarshalFailure
-	}
 	price, priceErr := strconv.ParseFloat(serverResp.Result.List[0].LastPrice, 64)
 	if priceErr != nil {
 		return 0, errPriceRespUnmarshalFailure
@@ -175,17 +245,9 @@ func (bh *BybitHandler) GetWalletBalance() (float64, error) {
 	if err != nil {
 		return 0, err
 	}
-	if res.RetCode != 0 || res.RetMsg != "OK" {
-		return 0, errInvalidServerResp
-	}
-	jsonData, err := json.Marshal(res)
-	if err != nil {
-		return 0, fmt.Errorf("error marshaling response to JSON: %w", err)
-	}
-
-	var serverResp ServerResponse
-	if err := json.Unmarshal(jsonData, &serverResp); err != nil {
-		return 0, errWalletRespUnmarshalFailure
+	serverResp, extractErr := util.ExtractResponse(res)
+	if extractErr != nil {
+		return 0, extractErr
 	}
 
 	totalBlanace, err := strconv.ParseFloat(serverResp.Result.List[0].TotalAvailableBalance, 64)
