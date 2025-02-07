@@ -16,13 +16,21 @@ import (
 func main() {
 	logger := logger.Init()
 	ctx := context.Background()
-	app := NewApplication(ctx, logger)
-	// if err != nil {
-	// 	logger.Error("Failed to initalise application", "error", err)
-	// 	os.Exit(1)
-	// }
+
 	var addr = flag.String("addr", ":4000", "HTTP network address")
+	exchangeName := flag.String("exchange", "", "Exchange name")
+	stage := flag.String("stage", "", "Stag environment")
+
 	flag.Parse()
+
+	if *exchangeName == "" || *stage == "" {
+		log.Fatal("exchange and stage args are required to start server")
+	}
+
+	app := NewApplication(ctx, *exchangeName, *stage, logger)
+	if app == nil {
+		panic("app init failed")
+	}
 
 	server := &http.Server{
 		Addr:         *addr,
@@ -36,7 +44,8 @@ func main() {
 	app.logger.Info("starting server", slog.Any("addr", *addr))
 	go func() {
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("listen: %s\n", err)
+			app.logger.Error("server listen error", slog.String("error", err.Error()))
+			os.Exit(1)
 		}
 	}()
 	quit := make(chan os.Signal, 1)
@@ -47,5 +56,5 @@ func main() {
 	if err := server.Shutdown(ctx); err != nil {
 		log.Fatal("Server forced to shutdown: ", err)
 	}
-	os.Exit(1)
+	os.Exit(0)
 }
