@@ -1,6 +1,7 @@
 package exchange
 
 import (
+	"context"
 	"errors"
 	"log/slog"
 
@@ -8,8 +9,6 @@ import (
 )
 
 type Signal interface {
-	GetType() string
-	GetAction() string
 	GetSymbol() string
 	GetLeverage() int64
 }
@@ -22,13 +21,13 @@ type ExchangeStrategy interface {
 	Process(Signal) error
 }
 
-func NewExchangeHandler(exchangeType string, apiKey string, secret string, stage types.Environment, logger *slog.Logger) (ExchangeStrategy, error) {
+func NewExchangeHandler(ctx context.Context, exchangeType string, apiKey string, secret string, stage types.Environment, logger *slog.Logger) (ExchangeStrategy, error) {
 	switch exchangeType {
 	case "binance":
 		//TODO: add stage to this handler
 		return NewBinanceHandler(apiKey, secret, logger), nil
 	case "bybit":
-		return NewBybitHandler(apiKey, secret, stage, logger), nil
+		return NewBybitHandler(ctx, apiKey, secret, stage, logger), nil
 	default:
 		return nil, errors.New("unsupported exchange")
 	}

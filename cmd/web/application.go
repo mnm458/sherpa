@@ -83,7 +83,7 @@ func NewApplication(ctx context.Context, exchangeName string, stage string, logg
 		panic("invalid credentials")
 	}
 
-	eh, err := exchange.NewExchangeHandler(exchangeName, apiKey, secret, environment, logger)
+	eh, err := exchange.NewExchangeHandler(ctx, exchangeName, apiKey, secret, environment, logger)
 	if err != nil {
 		logger.Error(err.Error())
 		return nil
