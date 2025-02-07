@@ -20,7 +20,7 @@ type ExchangeStrategy interface {
 	Process(Signal) error
 }
 
-func NewExchangeHandler(exchangeType string, apiKey string, secret string, logger *slog.Logger) (ExchangeStrategy, error) {
+func NewExchangeHandler(exchangeType string, apiKey string, secret string, baseURL string, logger *slog.Logger) (ExchangeStrategy, error) {
 	switch exchangeType {
 	case "binance":
 		return NewBinanceHandler(apiKey, secret, logger), nil
