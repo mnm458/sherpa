@@ -1,0 +1,3 @@
+[submodule "bybit.go.api"]
+	path = bybit.go.api
+	url = https://github.com/bybit-exchange/bybit.go.api.git
