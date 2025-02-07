@@ -12,8 +12,6 @@ import (
 )
 
 const (
-	TEST_ENV              = "test"
-	PROD_ENV              = "prod"
 	BYBIT_API_KEY_TEST    = "BYBIT_API_KEY_TEST"
 	BYBIT_SECRET_TEST     = "BYBIT_SECRET_TEST"
 	BINANCE_API_KEY_TEST  = "BINANCE_API_KEY_TEST"
@@ -54,22 +52,22 @@ func NewApplication(ctx context.Context, exchangeName string, stage string, logg
 	}
 	switch exchangeName {
 	case "binance":
-		switch stage {
-		case TEST_ENV:
+		switch environment {
+		case types.TEST:
 			apiKey = os.Getenv(BINANCE_API_KEY_TEST)
 			secret = os.Getenv(BINANCE_SECRET_TEST)
-		case PROD_ENV:
+		case types.PROD:
 			apiKey = os.Getenv(BINANCE_API_KEY_PROD)
 			secret = os.Getenv(BINANCE_SECRET_PROD)
 		default:
 			panic("unsupported stage env")
 		}
 	case "bybit":
-		switch stage {
-		case TEST_ENV:
+		switch environment {
+		case types.TEST:
 			apiKey = os.Getenv(BYBIT_API_KEY_TEST)
 			secret = os.Getenv(BYBIT_SECRET_TEST)
-		case PROD_ENV:
+		case types.PROD:
 			apiKey = os.Getenv(BYBIT_API_KEY_PROD)
 			secret = os.Getenv(BYBIT_SECRET_PROD)
 		default:

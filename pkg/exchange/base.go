@@ -25,7 +25,7 @@ func NewExchangeHandler(ctx context.Context, exchangeType string, apiKey string,
 	switch exchangeType {
 	case "binance":
 		//TODO: add stage to this handler
-		return NewBinanceHandler(apiKey, secret, logger), nil
+		return NewBinanceHandler(ctx, apiKey, secret, logger), nil
 	case "bybit":
 		return NewBybitHandler(ctx, apiKey, secret, stage, logger), nil
 	default:

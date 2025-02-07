@@ -1,6 +1,7 @@
 package exchange
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -90,6 +91,7 @@ func (b BinanceSignal) String() string {
 }
 
 type BinanceHandler struct {
+	ctx            context.Context
 	apiKey         string
 	secret         string
 	client         *http.Client
@@ -102,8 +104,9 @@ type BinanceHandler struct {
 	currentMonitor *posmon.PositionMonitor
 }
 
-func NewBinanceHandler(apiKey string, secret string, logger *slog.Logger) *BinanceHandler {
+func NewBinanceHandler(ctx context.Context, apiKey string, secret string, logger *slog.Logger) *BinanceHandler {
 	return &BinanceHandler{
+		ctx:            ctx,
 		apiKey:         apiKey,
 		secret:         secret,
 		client:         &http.Client{},
