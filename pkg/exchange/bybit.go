@@ -34,6 +34,7 @@ type BybitSignal struct {
 	IsLeverage  int8
 	TPOderType  string
 	SLOrderType string
+	Leverage    int64
 }
 
 func (bs BybitSignal) GetSymbol() string {
@@ -129,6 +130,11 @@ func (bh *BybitHandler) Process(s Signal) error {
 
 	qty := bh.calculateQuantity(balance, price, int32(bs.GetLeverage()))
 
+	levErr := bh.setLeverage(&bs)
+	if levErr != nil {
+		return levErr
+	}
+
 	finalPrice, tpPrice, slPrice, calcErr := bh.calculateTPSLPrice(price, &bs)
 	if calcErr != nil {
 		bh.logger.Error("[BybitHandler] Failed calculate final prices", "error", calcErr)
@@ -142,6 +148,23 @@ func (bh *BybitHandler) Process(s Signal) error {
 	}
 	bh.logger.Info("[BybitHandler] Order placed successfull", "orderID", orderID)
 
+	return nil
+}
+
+func (bh *BybitHandler) setLeverage(signal *BybitSignal) error {
+	params := map[string]interface{}{
+		"category":     signal.Category,
+		"symbol":       signal.Symbol,
+		"buyLeverage":  signal.Leverage,
+		"sellLeverage": signal.Leverage,
+	}
+	res, err := bh.client.NewUtaBybitServiceWithParams(params).SetPositionLeverage(bh.ctx)
+	if err != nil {
+		return err
+	}
+	if res.RetCode != 0 || res.RetMsg != "OK" {
+		return types.ErrInvalidServerResp
+	}
 	return nil
 }
 
@@ -257,14 +280,3 @@ func (bh *BybitHandler) GetWalletBalance() (float64, error) {
 	bh.logger.Info("[BybitHandler] total balance received", "balance", totalBlanace)
 	return totalBlanace, nil
 }
-
-// func (bh *BybitHandler) placeOrder(s BybitSignal) error {
-// 	params := map[string]interface{}{
-// 		"category":    s.Category,
-// 		"symbol":      s.Symbol,
-// 		"side":        s.Side,
-// 		"positionIdx": s.PositionIdx,
-// 	}
-// 	_ = params
-// 	return nil
-// }
