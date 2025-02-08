@@ -31,21 +31,21 @@ const (
 type application struct {
 	ctx             context.Context
 	logger          *slog.Logger
-	exchangeHandler exchange.ExchangeStrategy
+	ExchangeHandler exchange.ExchangeStrategy
 	wsURL           string
 	apiKey          string
 	secret          string
-	MainOrderId     string
+	CurrMainOrder   types.MainOrder
 	TpOrderId       string
 	SlOrderId       string
-	OrderIDChan     chan string
+	MainOrderChan   chan types.MainOrder
 }
 
 func NewApplication(ctx context.Context, exchangeName string, stage string, logger *slog.Logger) *application {
 	var apiKey string
 	var secret string
 	var wsUrl string
-	orderIDChan := make(chan string)
+	mainOrderChan := make(chan types.MainOrder)
 	exchangeName = strings.ToLower(exchangeName)
 	stage = strings.ToUpper(stage)
 	var environment types.Environment
@@ -93,7 +93,7 @@ func NewApplication(ctx context.Context, exchangeName string, stage string, logg
 		panic("invalid credentials")
 	}
 
-	eh, err := exchange.NewExchangeHandler(ctx, exchangeName, apiKey, secret, environment, orderIDChan, logger)
+	eh, err := exchange.NewExchangeHandler(ctx, exchangeName, apiKey, secret, environment, mainOrderChan, logger)
 	if err != nil {
 		logger.Error(err.Error())
 		return nil
@@ -104,15 +104,15 @@ func NewApplication(ctx context.Context, exchangeName string, stage string, logg
 		wsURL:           wsUrl,
 		apiKey:          apiKey,
 		secret:          secret,
-		OrderIDChan:     orderIDChan,
-		exchangeHandler: eh}
+		MainOrderChan:   mainOrderChan,
+		ExchangeHandler: eh}
 }
 
 func (a *application) ListenForOrderUpdates() {
 	go func() {
-		for id := range a.OrderIDChan {
-			fmt.Println("got a new main order ======>", id)
-			a.MainOrderId = id
+		for order := range a.MainOrderChan {
+			fmt.Println("got a new main order ======>", order)
+			a.CurrMainOrder = order
 		}
 	}()
 }

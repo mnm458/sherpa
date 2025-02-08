@@ -15,11 +15,10 @@ import (
 )
 
 type BybitHandler struct {
-	client *bybitClib.Client
-	// websockClient *bybitClib.WebSocket
-	ctx         context.Context
-	logger      *slog.Logger
-	orderIDChan chan string
+	client        *bybitClib.Client
+	ctx           context.Context
+	logger        *slog.Logger
+	mainOrderChan chan types.MainOrder
 }
 
 type BybitSignal struct {
@@ -69,11 +68,11 @@ const (
 	BYBIT_BASE_URL_PROD = "https://api.bybit.com"
 )
 
-func NewBybitHandler(ctx context.Context, apiKey string, secret string, stage types.Environment, orderIDChan chan string, logger *slog.Logger) *BybitHandler {
+func NewBybitHandler(ctx context.Context, apiKey string, secret string, stage types.Environment, mainOrderChan chan types.MainOrder, logger *slog.Logger) *BybitHandler {
 	handler := &BybitHandler{
-		ctx:         ctx,
-		logger:      logger,
-		orderIDChan: orderIDChan,
+		ctx:           ctx,
+		logger:        logger,
+		mainOrderChan: mainOrderChan,
 	}
 	switch stage {
 	case types.PROD:
@@ -144,11 +143,10 @@ func (bh *BybitHandler) Process(s Signal) error {
 		return calcErr
 	}
 
-	orderID, orderErr := bh.placeOrder(&bs, qty, finalPrice, tpPrice, slPrice, precision)
+	orderID, orderErr := bh.PlaceOrder(bs.Category, bs.Symbol, bs.Side, bs.OrderType, qty, finalPrice, tpPrice, slPrice, precision)
 	if orderErr != nil {
 		return orderErr
 	}
-	bh.orderIDChan <- orderID
 
 	bh.logger.Info("[BybitHandler] Order placed successfull", "orderID", orderID)
 
@@ -180,16 +178,20 @@ func (bh *BybitHandler) setLeverage(signal *BybitSignal) error {
 	return nil
 }
 
-func (bh *BybitHandler) placeOrder(signal *BybitSignal, quantity float64, finalPrice float64, tpPrice float64, slPrice float64, precision int64) (string, error) {
+func (bh *BybitHandler) PlaceOrder(category string, symbol string, side string, orderType string, quantity float64, finalPrice float64, tpPrice float64, slPrice float64, precision int64) (string, error) {
+	qtyStr := strconv.FormatFloat(quantity, 'f', 3, 64)
+	priceStr := strconv.FormatFloat(finalPrice, 'f', int(precision), 64)
+	tpStr := strconv.FormatFloat(tpPrice, 'f', int(precision), 64)
+	slStr := strconv.FormatFloat(slPrice, 'f', int(precision), 64)
 	params := map[string]interface{}{
-		"category":   signal.Category,
-		"symbol":     signal.Symbol,
-		"side":       signal.Side,
-		"orderType":  signal.OrderType,
-		"qty":        strconv.FormatFloat(quantity, 'f', 3, 64),
-		"price":      strconv.FormatFloat(finalPrice, 'f', int(precision), 64),
-		"takeProfit": strconv.FormatFloat(tpPrice, 'f', int(precision), 64),
-		"stopLoss":   strconv.FormatFloat(slPrice, 'f', int(precision), 64),
+		"category":   category,
+		"symbol":     symbol,
+		"side":       side,
+		"orderType":  orderType,
+		"qty":        qtyStr,
+		"price":      priceStr,
+		"takeProfit": tpStr,
+		"stopLoss":   slStr,
 	}
 	fmt.Println("PARAMS: ", params)
 	res, orderErr := bh.client.NewUtaBybitServiceWithParams(params).PlaceOrder(bh.ctx)
@@ -210,6 +212,17 @@ func (bh *BybitHandler) placeOrder(signal *BybitSignal, quantity float64, finalP
 
 	if unmarshalErr := json.Unmarshal(jsonData, &serverResp); unmarshalErr != nil {
 		return "", unmarshalErr
+	}
+	bh.mainOrderChan <- types.MainOrder{
+		Category:   category,
+		Symbol:     symbol,
+		Side:       side,
+		OrderType:  orderType,
+		Quantity:   quantity,
+		Price:      finalPrice,
+		TakeProfit: tpPrice,
+		StopLoss:   slPrice,
+		Precision:  precision,
 	}
 	return serverResp.Result.OrderId, nil
 

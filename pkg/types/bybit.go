@@ -30,3 +30,15 @@ type ByBitOrderResponse struct {
 }
 
 var ErrInvalidServerResp = errors.New("invalid wallet balance response")
+
+type MainOrder struct {
+	Category   string
+	Symbol     string
+	Side       string
+	OrderType  string
+	Quantity   float64
+	Price      float64
+	TakeProfit float64
+	StopLoss   float64
+	Precision  int64
+}

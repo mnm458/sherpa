@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/mnm458/sherpa/internal/logger"
-	"github.com/mnm458/sherpa/pkg/bystream"
 )
 
 func main() {
@@ -34,8 +33,9 @@ func main() {
 	}
 	if *exchangeName == "bybit" {
 		go func() {
-			bystream.Connect(app.wsURL, app.apiKey, app.secret)
+			app.WSConnect(app.wsURL, app.ExchangeHandler)
 		}()
+	} else if *exchangeName == "binance" {
 	}
 	server := &http.Server{
 		Addr:         *addr,
