@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/mnm458/sherpa/internal/logger"
+	"github.com/mnm458/sherpa/pkg/bystream"
 )
 
 func main() {
@@ -31,7 +32,11 @@ func main() {
 	if app == nil {
 		panic("app init failed")
 	}
-
+	if *exchangeName == "bybit" {
+		go func() {
+			bystream.Connect(app.wsURL, app.apiKey, app.secret)
+		}()
+	}
 	server := &http.Server{
 		Addr:         *addr,
 		Handler:      app.routes(),
@@ -48,6 +53,7 @@ func main() {
 			os.Exit(1)
 		}
 	}()
+	app.ListenForOrderUpdates()
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, os.Interrupt)
 	<-quit

@@ -17,8 +17,9 @@ import (
 type BybitHandler struct {
 	client *bybitClib.Client
 	// websockClient *bybitClib.WebSocket
-	ctx    context.Context
-	logger *slog.Logger
+	ctx         context.Context
+	logger      *slog.Logger
+	orderIDChan chan string
 }
 
 type BybitSignal struct {
@@ -68,10 +69,11 @@ const (
 	BYBIT_BASE_URL_PROD = "https://api.bybit.com"
 )
 
-func NewBybitHandler(ctx context.Context, apiKey string, secret string, stage types.Environment, logger *slog.Logger) *BybitHandler {
+func NewBybitHandler(ctx context.Context, apiKey string, secret string, stage types.Environment, orderIDChan chan string, logger *slog.Logger) *BybitHandler {
 	handler := &BybitHandler{
-		ctx:    ctx,
-		logger: logger,
+		ctx:         ctx,
+		logger:      logger,
+		orderIDChan: orderIDChan,
 	}
 	switch stage {
 	case types.PROD:
@@ -146,6 +148,8 @@ func (bh *BybitHandler) Process(s Signal) error {
 	if orderErr != nil {
 		return orderErr
 	}
+	bh.orderIDChan <- orderID
+
 	bh.logger.Info("[BybitHandler] Order placed successfull", "orderID", orderID)
 
 	return nil

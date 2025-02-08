@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"strings"
@@ -24,17 +25,27 @@ const (
 	BINANCE_BASE_URL_TEST = "BINANCE_BASE_URL_TEST"
 	BYBIT_BASE_URL_PROD   = "BYBIT_BASE_URL_PROD"
 	BINANCE_BASE_URL_PROD = "BINANCE_BASE_URL_PROD"
+	BYBIT_WS_PRIVATE_PROD = "BYBIT_WS_PRIVATE_PROD"
 )
 
 type application struct {
 	ctx             context.Context
 	logger          *slog.Logger
 	exchangeHandler exchange.ExchangeStrategy
+	wsURL           string
+	apiKey          string
+	secret          string
+	MainOrderId     string
+	TpOrderId       string
+	SlOrderId       string
+	OrderIDChan     chan string
 }
 
 func NewApplication(ctx context.Context, exchangeName string, stage string, logger *slog.Logger) *application {
 	var apiKey string
 	var secret string
+	var wsUrl string
+	orderIDChan := make(chan string)
 	exchangeName = strings.ToLower(exchangeName)
 	stage = strings.ToUpper(stage)
 	var environment types.Environment
@@ -70,6 +81,7 @@ func NewApplication(ctx context.Context, exchangeName string, stage string, logg
 		case types.PROD:
 			apiKey = os.Getenv(BYBIT_API_KEY_PROD)
 			secret = os.Getenv(BYBIT_SECRET_PROD)
+			wsUrl = os.Getenv(BYBIT_WS_PRIVATE_PROD)
 		default:
 			panic("unsupported stage env")
 		}
@@ -81,7 +93,7 @@ func NewApplication(ctx context.Context, exchangeName string, stage string, logg
 		panic("invalid credentials")
 	}
 
-	eh, err := exchange.NewExchangeHandler(ctx, exchangeName, apiKey, secret, environment, logger)
+	eh, err := exchange.NewExchangeHandler(ctx, exchangeName, apiKey, secret, environment, orderIDChan, logger)
 	if err != nil {
 		logger.Error(err.Error())
 		return nil
@@ -89,5 +101,18 @@ func NewApplication(ctx context.Context, exchangeName string, stage string, logg
 	return &application{
 		ctx:             ctx,
 		logger:          logger,
+		wsURL:           wsUrl,
+		apiKey:          apiKey,
+		secret:          secret,
+		OrderIDChan:     orderIDChan,
 		exchangeHandler: eh}
+}
+
+func (a *application) ListenForOrderUpdates() {
+	go func() {
+		for id := range a.OrderIDChan {
+			fmt.Println("got a new main order ======>", id)
+			a.MainOrderId = id
+		}
+	}()
 }
