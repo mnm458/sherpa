@@ -31,7 +31,7 @@ type ByBitOrderResponse struct {
 
 var ErrInvalidServerResp = errors.New("invalid wallet balance response")
 
-type MainOrder struct {
+type ByMainOrder struct {
 	Category   string
 	Symbol     string
 	Side       string

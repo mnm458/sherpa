@@ -4,6 +4,8 @@ import (
 	"github.com/adshao/go-binance/v2/futures"
 )
 
+const LISTEN_KEY_EXPIRED_EVENT = "listenKeyExpired"
+
 type Order struct {
 	AvgPrice            string `json:"avgPrice"`
 	ClientOrderId       string `json:"clientOrderId"`
@@ -83,8 +85,8 @@ type OrderTradeUpdate struct {
 	PositionSide  string `json:"ps"`
 }
 
-type UserDataEvent struct {
-	EventType string           `json:"e"`
-	EventTime int64            `json:"E"`
-	Order     OrderTradeUpdate `json:"o"`
+type BiSubmittedOrders struct {
+	MainOrder *futures.Order
+	TPOrder   *futures.Order
+	SLOrder   *futures.Order
 }

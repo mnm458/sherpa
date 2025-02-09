@@ -1,8 +1,8 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 
 	"github.com/mnm458/sherpa/pkg/exchange"
@@ -47,47 +47,16 @@ func (app *application) testBinance(w http.ResponseWriter, r *http.Request) {
 
 }
 
-// func (app *application) testBinance(w http.ResponseWriter, r *http.Request) {
-// 	var signal exchange.BinanceSignal
-
-// 	err := json.NewDecoder(r.Body).Decode(&signal)
-// 	if err != nil {
-// 		http.Error(w, err.Error(), http.StatusBadRequest)
-// 		return
-// 	}
-
-// 	err = app.ExchangeHandler.Process(signal)
-// 	if err != nil {
-// 		fmt.Println(err)
-// 	}
-
-// 	w.WriteHeader(http.StatusOK)
-
-// }
-
-func (app *application) handleBinance(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(r.Body)
+func (app *application) HandleSignal(w http.ResponseWriter, r *http.Request) {
+	var signal exchange.Signal
+	err := json.NewDecoder(r.Body).Decode(&signal)
 	if err != nil {
-		http.Error(w, "Error reading request body", http.StatusInternalServerError)
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	defer r.Body.Close()
-
-	fmt.Printf("Received body: %s\n", body)
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("Received binance signal POST request"))
-
-}
-
-func (app *application) handleBybit(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(r.Body)
+	err = app.ExchangeHandler.Process(signal)
 	if err != nil {
-		http.Error(w, "Error reading request body", http.StatusInternalServerError)
-		return
+		fmt.Println(err)
 	}
-	defer r.Body.Close()
-
-	fmt.Printf("Received body: %s\n", body)
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("Received binance signal POST request"))
 }

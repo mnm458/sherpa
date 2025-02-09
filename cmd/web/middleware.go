@@ -35,12 +35,19 @@ func (app *application) logRequest(next http.Handler) http.Handler {
 		next.ServeHTTP(w, r)
 	})
 }
+
+type contextKey string
+
+const nonceKey contextKey = "nonce"
+
 func generateNonce() (string, error) {
-	nonce := make([]byte, 16)
-	if _, err := rand.Read(nonce); err != nil {
-		return "", err
+	// Generate 16 bytes of random data
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("failed to generate nonce: %w", err)
 	}
-	return base64.StdEncoding.EncodeToString(nonce), nil
+	// Convert to base64
+	return base64.StdEncoding.EncodeToString(b), nil
 }
 
 // set common http request headers
@@ -51,18 +58,17 @@ func commonHeaders(next http.Handler) http.Handler {
 			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 			return
 		}
-		//TODO: revert to csp := "default-src 'self'; style-src 'self'; script-src 'self' 'nonce-" + nonce + "'; connect-src 'self' https://storage.googleapis.com"
+
 		csp := "script-src 'self' 'nonce-" + nonce + "'; connect-src 'self' https://storage.googleapis.com"
 		w.Header().Set("Content-Security-Policy", csp)
 		w.Header().Set("Referrer-Policy", "origin-when-cross-origin")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "deny")
 		w.Header().Set("X-XSS-Protection", "0")
-		//custom header
 		w.Header().Set("Server", "Proprietary-MHK")
 
-		//forward to next handler
-		ctx := context.WithValue(r.Context(), "nonce", nonce)
+		// Use typed context key instead of string
+		ctx := context.WithValue(r.Context(), nonceKey, nonce)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }

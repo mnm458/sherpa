@@ -18,7 +18,7 @@ type BybitHandler struct {
 	client        *bybitClib.Client
 	ctx           context.Context
 	logger        *slog.Logger
-	mainOrderChan chan types.MainOrder
+	mainOrderChan chan types.ByMainOrder
 }
 
 type BybitSignal struct {
@@ -68,7 +68,7 @@ const (
 	BYBIT_BASE_URL_PROD = "https://api.bybit.com"
 )
 
-func NewBybitHandler(ctx context.Context, apiKey string, secret string, stage types.Environment, mainOrderChan chan types.MainOrder, logger *slog.Logger) *BybitHandler {
+func NewBybitHandler(ctx context.Context, apiKey string, secret string, stage types.Environment, mainOrderChan chan types.ByMainOrder, logger *slog.Logger) *BybitHandler {
 	handler := &BybitHandler{
 		ctx:           ctx,
 		logger:        logger,
@@ -213,7 +213,7 @@ func (bh *BybitHandler) PlaceOrder(category string, symbol string, side string, 
 	if unmarshalErr := json.Unmarshal(jsonData, &serverResp); unmarshalErr != nil {
 		return "", unmarshalErr
 	}
-	bh.mainOrderChan <- types.MainOrder{
+	bh.mainOrderChan <- types.ByMainOrder{
 		Category:   category,
 		Symbol:     symbol,
 		Side:       side,

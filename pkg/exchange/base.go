@@ -21,13 +21,13 @@ type ExchangeStrategy interface {
 	Process(Signal) error
 }
 
-func NewExchangeHandler(ctx context.Context, exchangeType string, apiKey string, secret string, stage types.Environment, mainOrderChan chan types.MainOrder, logger *slog.Logger) (ExchangeStrategy, error) {
+func NewExchangeHandler(ctx context.Context, exchangeType string, apiKey string, secret string, stage types.Environment, byOrderChan chan types.ByMainOrder, biOrderChan chan types.BiSubmittedOrders, logger *slog.Logger) (ExchangeStrategy, error) {
 	switch exchangeType {
 	case "binance":
 		//TODO: add stage to this handler
-		return NewBinanceHandler(ctx, apiKey, secret, logger), nil
+		return NewBinanceHandler(ctx, apiKey, secret, biOrderChan, logger), nil
 	case "bybit":
-		return NewBybitHandler(ctx, apiKey, secret, stage, mainOrderChan, logger), nil
+		return NewBybitHandler(ctx, apiKey, secret, stage, byOrderChan, logger), nil
 	default:
 		return nil, errors.New("unsupported exchange")
 	}

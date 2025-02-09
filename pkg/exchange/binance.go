@@ -8,7 +8,6 @@ import (
 	"math"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/adshao/go-binance/v2/futures"
 	"github.com/mnm458/sherpa/pkg/types"
@@ -47,23 +46,57 @@ func (b BinanceSignal) String() string {
 }
 
 type BinanceHandler struct {
-	ctx    context.Context
-	apiKey string
-	secret string
-	logger *slog.Logger
-	client *futures.Client
+	Ctx                 context.Context
+	apiKey              string
+	secret              string
+	logger              *slog.Logger
+	Client              *futures.Client
+	ListenKey           string
+	submittedOrdersChan chan types.BiSubmittedOrders
 }
 
-func NewBinanceHandler(ctx context.Context, apiKey string, secret string, logger *slog.Logger) *BinanceHandler {
+func NewBinanceHandler(ctx context.Context, apiKey string, secret string, submittedOrdersChan chan types.BiSubmittedOrders, logger *slog.Logger) *BinanceHandler {
 	fmt.Println("API KEY + SECRET", apiKey, secret)
 	futures.UseTestnet = true
 	client := futures.NewClient(apiKey, secret)
+	listenKey, err := client.NewStartUserStreamService().Do(ctx)
+	if err != nil {
+		panic("failed to create listen key")
+	}
+
+	wsHandler := func(event *futures.WsUserDataEvent) {
+		jsonBytes, err := json.MarshalIndent(event, "", "  ")
+		if err != nil {
+			fmt.Println("error:", err)
+			return
+		}
+
+		var parsedEvent futures.WsUserDataEvent
+		if err := json.Unmarshal(jsonBytes, &parsedEvent); err != nil {
+			fmt.Println("error:", err)
+			return
+		}
+		fmt.Printf("Parsed event: %+v\n", parsedEvent)
+	}
+
+	errHandler := func(err error) {
+		fmt.Println("WebSocket error:", err)
+	}
+
+	go func() {
+		_, _, err := futures.WsUserDataServe(listenKey, wsHandler, errHandler)
+		if err != nil {
+			fmt.Println("WebSocket serve error:", err)
+		}
+	}()
 	return &BinanceHandler{
-		ctx:    ctx,
-		apiKey: apiKey,
-		secret: secret,
-		client: client,
-		logger: logger,
+		Ctx:                 ctx,
+		apiKey:              apiKey,
+		secret:              secret,
+		Client:              client,
+		logger:              logger,
+		ListenKey:           listenKey,
+		submittedOrdersChan: submittedOrdersChan,
 	}
 }
 
@@ -123,7 +156,7 @@ func (bh *BinanceHandler) Process(s Signal) error {
 func (bh *BinanceHandler) getPricePrecisionAndTickSize() (float64, float64, error) {
 	var tickSize float64
 	var stepSize float64
-	exInfo, err := bh.client.NewExchangeInfoService().Do(bh.ctx)
+	exInfo, err := bh.Client.NewExchangeInfoService().Do(bh.Ctx)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -161,38 +194,6 @@ func countDecimalPlaces(tickSize float64) int {
 }
 
 func (bh *BinanceHandler) ExecuteBatchOrder(s *BinanceSignal, price float64, qty float64, stepSize float64, tickSize float64) error {
-	//ws setup
-	listenKey, err := bh.client.NewStartUserStreamService().Do(bh.ctx)
-	if err != nil {
-		return err
-	}
-
-	doneC := make(chan struct{})
-	wsHandler := func(event *futures.WsUserDataEvent) {
-		jsonBytes, err := json.MarshalIndent(event, "", "  ")
-		if err != nil {
-			fmt.Println("error:", err)
-			return
-		}
-
-		var parsedEvent types.UserDataEvent
-		if err := json.Unmarshal(jsonBytes, &parsedEvent); err != nil {
-			fmt.Println("error:", err)
-			return
-		}
-		fmt.Printf("Parsed event: %+v\n", parsedEvent)
-	}
-
-	errHandler := func(err error) {
-		fmt.Println("WebSocket error:", err)
-	}
-
-	go func() {
-		_, _, err := futures.WsUserDataServe(listenKey, wsHandler, errHandler)
-		if err != nil {
-			fmt.Println("WebSocket serve error:", err)
-		}
-	}()
 
 	orders := make([]*futures.CreateOrderService, 0, 3)
 	finalPrice := math.Round(price/tickSize) * tickSize
@@ -258,7 +259,7 @@ func (bh *BinanceHandler) ExecuteBatchOrder(s *BinanceSignal, price float64, qty
 	slOrderService := bh.CreateOrderLimitMarket(slOrder)
 	orders = append(orders, slOrderService)
 
-	res, err := bh.client.NewCreateBatchOrdersService().OrderList(orders).Do(bh.ctx)
+	res, err := bh.Client.NewCreateBatchOrdersService().OrderList(orders).Do(bh.Ctx)
 	if err != nil {
 		return err
 	}
@@ -268,23 +269,19 @@ func (bh *BinanceHandler) ExecuteBatchOrder(s *BinanceSignal, price float64, qty
 		}
 	}
 	bh.logger.Info("Orders placed successfully", "res", res)
+	var submittedOrders types.BiSubmittedOrders
 
-	ticker := time.NewTicker(50 * time.Minute)
-	go func() {
-		for {
-			select {
-			case <-ticker.C:
-				err := bh.client.NewKeepaliveUserStreamService().ListenKey(listenKey).Do(bh.ctx)
-				if err != nil {
-					fmt.Println("Keepalive error:", err)
-				}
-			case <-doneC:
-				ticker.Stop()
-				return
-			}
+	for _, order := range res.Orders {
+		if order.Type == futures.OrderType(strings.ToUpper(s.Type)) {
+			submittedOrders.MainOrder = order
+		} else if order.Type == futures.OrderTypeTakeProfit {
+			submittedOrders.TPOrder = order
+		} else if order.Type == futures.OrderTypeStop {
+			submittedOrders.SLOrder = order
 		}
-	}()
+	}
 
+	bh.submittedOrdersChan <- submittedOrders
 	return nil
 }
 
@@ -305,7 +302,7 @@ func (bh *BinanceHandler) calculateTPSLPrice(price float64, action string, tp fl
 }
 
 func (bh *BinanceHandler) CreateOrderLimitMarket(args types.OpenOrder) *futures.CreateOrderService {
-	order := bh.client.NewCreateOrderService()
+	order := bh.Client.NewCreateOrderService()
 	if args.Symbol != "" {
 		order = order.Symbol(args.Symbol)
 	}
@@ -348,7 +345,7 @@ func (bh *BinanceHandler) CreateOrderLimitMarket(args types.OpenOrder) *futures.
 }
 
 func (bh *BinanceHandler) CancelAllOpenOrders(symbol string) error {
-	return bh.client.NewCancelAllOpenOrdersService().Symbol(symbol).Do(bh.ctx)
+	return bh.Client.NewCancelAllOpenOrdersService().Symbol(symbol).Do(bh.Ctx)
 }
 
 func (bh *BinanceHandler) getFinalQty(totalBalance float64, leverage int64, price float64) float64 {
@@ -359,10 +356,10 @@ func (bh *BinanceHandler) getFinalQty(totalBalance float64, leverage int64, pric
 
 // handleLeverage returns an error. This method set the leverage for the account. It is not order specific
 func (bh *BinanceHandler) handleLeverage(symbol string, leverage int64) error {
-	fmt.Println("client credentials:", bh.client.APIKey, bh.client.SecretKey, bh.client.BaseURL)
-	res, err := bh.client.NewChangeLeverageService().Symbol(symbol).Leverage(int(leverage)).Do(bh.ctx)
+	fmt.Println("client credentials:", bh.Client.APIKey, bh.Client.SecretKey, bh.Client.BaseURL)
+	res, err := bh.Client.NewChangeLeverageService().Symbol(symbol).Leverage(int(leverage)).Do(bh.Ctx)
 	if err != nil {
-		bh.logger.Error("[BinanceHandler] failed to set leverage, err=%v", err)
+		bh.logger.Error("[BinanceHandler] failed to set leverage", "error", err)
 		return err
 	}
 	if res.Leverage != int(leverage) {
@@ -372,13 +369,8 @@ func (bh *BinanceHandler) handleLeverage(symbol string, leverage int64) error {
 	return nil
 }
 
-// 	h := hmac.New(sha256.New, []byte(bh.secret))
-// 	h.Write([]byte(queryString))
-// 	return hex.EncodeToString(h.Sum(nil))
-// }
-
 func (bh *BinanceHandler) FetchCurrPrice(symbol string) (float64, error) {
-	res, err := bh.client.NewPremiumIndexService().Symbol(symbol).Do(bh.ctx)
+	res, err := bh.Client.NewPremiumIndexService().Symbol(symbol).Do(bh.Ctx)
 	if err != nil {
 		return 0, err
 	}
@@ -398,7 +390,7 @@ func (bh *BinanceHandler) FetchCurrPrice(symbol string) (float64, error) {
 }
 
 func (bh *BinanceHandler) GetAccountBalance() (float64, error) {
-	res, err := bh.client.NewGetAccountService().Do(bh.ctx)
+	res, err := bh.Client.NewGetAccountService().Do(bh.Ctx)
 	if err != nil {
 		return 0, err
 	}

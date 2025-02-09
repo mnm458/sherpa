@@ -34,7 +34,7 @@ const (
 	STATUS_TRIGGERED = "Triggered"
 )
 
-func (a *application) WSConnect(wsUrl string, eh exchange.ExchangeStrategy) {
+func (a *application) WSByConnect(wsUrl string, eh exchange.ExchangeStrategy) {
 	bybitHandler, ok := eh.(*exchange.BybitHandler)
 	if !ok {
 		fmt.Println("FAILED TO CAST TO BYBIT HANDLER")
@@ -140,22 +140,22 @@ func (a *application) receive(message string, handler *exchange.BybitHandler) {
 				fmt.Println("|               INITIATING ORDER REENTRY                |")
 				fmt.Println(strings.Repeat("-", 50))
 				handler.PlaceOrder(
-					a.CurrMainOrder.Category,
-					a.CurrMainOrder.Symbol,
-					a.CurrMainOrder.Side,
-					a.CurrMainOrder.OrderType,
-					a.CurrMainOrder.Quantity,
-					a.CurrMainOrder.Price,
-					a.CurrMainOrder.TakeProfit,
-					a.CurrMainOrder.StopLoss,
-					a.CurrMainOrder.Precision)
+					a.CurrByMainOrder.Category,
+					a.CurrByMainOrder.Symbol,
+					a.CurrByMainOrder.Side,
+					a.CurrByMainOrder.OrderType,
+					a.CurrByMainOrder.Quantity,
+					a.CurrByMainOrder.Price,
+					a.CurrByMainOrder.TakeProfit,
+					a.CurrByMainOrder.StopLoss,
+					a.CurrByMainOrder.Precision)
 			}
 		case CREATE_TYPE_SL:
 			if order.Status == STATUS_TRIGGERED {
 				fmt.Println(strings.Repeat("-", 50))
 				fmt.Println("|               STOP LOSS HIT                |")
 				fmt.Println(strings.Repeat("-", 50))
-				a.CurrMainOrder = types.MainOrder{}
+				a.CurrByMainOrder = types.ByMainOrder{}
 			}
 		}
 		fmt.Println(strings.Repeat("-", 50))

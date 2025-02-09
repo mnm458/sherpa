@@ -33,9 +33,13 @@ func main() {
 	}
 	if *exchangeName == "bybit" {
 		go func() {
-			app.WSConnect(app.wsURL, app.ExchangeHandler)
+			app.WSByConnect(app.wsURL, app.ExchangeHandler)
 		}()
 	} else if *exchangeName == "binance" {
+		go func() {
+
+			app.WSBiConnect(app.ExchangeHandler)
+		}()
 	}
 	server := &http.Server{
 		Addr:         *addr,
@@ -53,7 +57,8 @@ func main() {
 			os.Exit(1)
 		}
 	}()
-	app.ListenForOrderUpdates()
+	go app.ListenForByOrderUpdates()
+	go app.ListenForBiOrderUpdates()
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, os.Interrupt)
 	<-quit
