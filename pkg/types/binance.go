@@ -1,5 +1,9 @@
 package types
 
+import (
+	"github.com/adshao/go-binance/v2/futures"
+)
+
 type Order struct {
 	AvgPrice            string `json:"avgPrice"`
 	ClientOrderId       string `json:"clientOrderId"`
@@ -29,6 +33,19 @@ type Order struct {
 	GoodTillDate        int64  `json:"goodTillDate"`
 }
 
+type OpenOrder struct {
+	Symbol        string            // BIGTIMEUSDT
+	Side          futures.SideType  // string // SELL
+	Type          futures.OrderType // string                   // LIMIT, MARKET
+	Quantity      string            // 464
+	Price         string            // 0.2151
+	StopPrice     string
+	WorkingType   futures.WorkingType
+	ClosePosition string
+	TimeInForce   futures.TimeInForceType
+	ReduceOnly    bool
+}
+
 type OrderStatusChecker interface {
 	GetOrder(symbol string, orderId int64) (*Order, error)
 }
@@ -46,4 +63,28 @@ type ReentryConditions struct {
 // MarketStreamChecker interface for checking reentry conditions
 type MarketStreamChecker interface {
 	CheckReentryConditions(price float64, conditions ReentryConditions) bool
+}
+
+type OrderTradeUpdate struct {
+	Symbol        string `json:"s"`
+	ClientOrderID string `json:"c"`
+	Side          string `json:"S"`
+	OrderType     string `json:"o"`
+	TimeInForce   string `json:"f"`
+	Quantity      string `json:"q"`
+	Price         string `json:"p"`
+	AvgPrice      string `json:"ap"`
+	StopPrice     string `json:"sp"`
+	CurrentStatus string `json:"X"`
+	OrderID       int64  `json:"i"`
+	Timestamp     int64  `json:"T"`
+	IsReduceOnly  bool   `json:"R"`
+	WorkingType   string `json:"wt"`
+	PositionSide  string `json:"ps"`
+}
+
+type UserDataEvent struct {
+	EventType string           `json:"e"`
+	EventTime int64            `json:"E"`
+	Order     OrderTradeUpdate `json:"o"`
 }

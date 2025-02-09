@@ -5,6 +5,7 @@ import "errors"
 const (
 	ACTION_LONG = "long"
 	TYPE_OPEN   = "open"
+	BTCUSDT     = "BTCUSDT"
 )
 
 var (

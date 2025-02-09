@@ -2,22 +2,16 @@ package exchange
 
 import (
 	"context"
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
 	"math"
-	"net/http"
-	"net/url"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/adshao/go-binance/v2"
-	futures "github.com/adshao/go-binance/v2/futures"
+	"github.com/adshao/go-binance/v2/futures"
+	"github.com/mnm458/sherpa/pkg/types"
 )
 
 const (
@@ -25,45 +19,12 @@ const (
 )
 
 type BinanceSignal struct {
-	Symbol   string
-	Type     string
-	Action   string
-	Leverage int64
-	TP       float64
-	SL       float64
-}
-
-type ReentryState struct {
-	Symbol       string
-	EntryPrice   float64
-	Leverage     int64
-	TP           float64
-	SL           float64
-	IsActive     bool
-	OriginalSide string
-}
-
-type OrderResponse struct {
-	OrderId int64 `json:"orderId"`
-}
-type BinanceAPIError struct {
-	Code int    `json:"code"`
-	Msg  string `json:"msg"`
-}
-
-type PriceResp struct {
-	Price float64 `json:"price"`
-}
-
-type BalanceResp struct {
-	Asset              string `json:"asset"`
-	WalletBalance      string `json:"walletBalance"`      // Modified
-	CrossWalletBalance string `json:"crossWalletBalance"` // Added
-	Balance            string `json:"balance"`            // Kept for compatibility
-}
-
-type USDTBalance struct {
-	USDTBalance float64
+	Symbol   string  `json:"symbol"`
+	Type     string  `json:"type"`
+	Action   string  `json:"action"`
+	Leverage int64   `json:"leverage"`
+	TP       float64 `json:"tp_level"`
+	SL       float64 `json:"sl_level"`
 }
 
 func (bs BinanceSignal) GetType() string {
@@ -94,7 +55,9 @@ type BinanceHandler struct {
 }
 
 func NewBinanceHandler(ctx context.Context, apiKey string, secret string, logger *slog.Logger) *BinanceHandler {
-	client := binance.NewFuturesClient(apiKey, secret)
+	fmt.Println("API KEY + SECRET", apiKey, secret)
+	futures.UseTestnet = true
+	client := futures.NewClient(apiKey, secret)
 	return &BinanceHandler{
 		ctx:    ctx,
 		apiKey: apiKey,
@@ -114,7 +77,7 @@ func (bh *BinanceHandler) Process(s Signal) error {
 	}
 	levErr := bh.handleLeverage(binanceSignal.Symbol, binanceSignal.Leverage)
 	if levErr != nil {
-		bh.logger.Error("[BinanceHandler] failed to set leverage", binanceSignal.Leverage)
+		bh.logger.Error("[BinanceHandler] failed to set leverage", "leverage", binanceSignal.Leverage)
 	}
 
 	price, err := bh.FetchCurrPrice(s.GetSymbol())
@@ -122,110 +85,281 @@ func (bh *BinanceHandler) Process(s Signal) error {
 		bh.logger.Error("Failed to fetch price", "error", err)
 		return err
 	}
-	_ = price
 
-	// totBalance, err := bh.GetAccountBalance()
-	// if err != nil {
-	// 	bh.logger.Error("Failed to get balance", "error", err)
-	// 	return err
-	// }
+	totBalance, err := bh.GetAccountBalance()
+	if err != nil {
+		bh.logger.Error("Failed to get balance", "error", err)
+		return err
+	}
+	bh.logger.Info("[BinanceHandler] account balance calculated", "balance", totBalance)
 
-	// availBalance := EQUITY_PERCENTAGE * totBalance
-	// leverage := float64(s.GetLeverage())
-	// //TODO: FLOOR 3DP
-	// quantity := (availBalance * leverage) / price
-	// bh.logger.Info("checkpoint 1", "Balance", totBalance, "Price", price, "Available Balance", availBalance, "Quantity", quantity)
+	qty := bh.getFinalQty(totBalance, binanceSignal.Leverage, price)
+	bh.logger.Info("[BinanceHandler] final quantity calculated", "qty", qty)
+
+	cancelErr := bh.CancelAllOpenOrders(binanceSignal.Symbol)
+	if cancelErr != nil {
+		bh.logger.Error("[BinanceHandler] fialed to cancel open orders", "error", cancelErr)
+	}
+	bh.logger.Info("[BinanceHandler] all open orders cancelled")
+
+	stepSize, tickSize, err := bh.getPricePrecisionAndTickSize()
+	if err != nil {
+		bh.logger.Error("[BinanceHandler] failed to get precision", "error", err)
+	}
+	bh.logger.Info("[BinanceHandler] precision calculated", "stepSize", stepSize, "tick size", tickSize)
+
+	mainErr := bh.ExecuteBatchOrder(&binanceSignal, price, qty, stepSize, tickSize)
+	if mainErr != nil {
+		bh.logger.Error("[BinanceHandler] order execution failed", "error", mainErr)
+	}
 	// validatedQuantity, err := bh.ValidateQuantity(binanceSignal.Symbol, quantity)
 	// if err != nil {
 	// 	bh.logger.Error("Failed to validate quantity", "error", err)
 	// 	return err
 	// }
-
-	// err = bh.CancelAllOpenOrders(binanceSignal.Symbol)
-	// if err != nil {
-	// 	bh.logger.Error("Failed to cancel all orders", "error", err)
-	// 	return err
-	// }
-
-	// err = bh.ExecuteMainOrder(&binanceSignal, price, validatedQuantity)
-	// if err != nil {
-	// 	bh.logger.Error("Failed to execute main order", "error", err)
-	// 	return err
-	// }
-
-	// err = bh.ExecuteTPOrder(&binanceSignal, price, validatedQuantity)
-	// if err != nil {
-	// 	bh.logger.Error("Failed to execute TP order", "error", err)
-	// 	return err
-	// }
-
-	// err = bh.ExecuteSLOrder(&binanceSignal, price, validatedQuantity)
-	// if err != nil {
-	// 	bh.logger.Error("Failed to execute SL order", "error", err)
-	// 	return err
-	// }
 	return nil
 }
-func (bh *BinanceHandler) sendRequest(method, endpoint string, params url.Values, needsAuth bool) ([]byte, error) {
-	fullURL := BASE + endpoint
 
-	if needsAuth {
-		timestamp := strconv.FormatInt(time.Now().UnixMilli(), 10)
-		params.Set("timestamp", timestamp)
-
-		// Generate signature from params without including the signature itself
-		signature := bh.generateSignature(params.Encode())
-
-		// Add signature to params after generating the signature
-		params.Set("signature", signature)
-	}
-
-	var req *http.Request
-	var err error
-
-	switch method {
-	case "GET":
-		fullURL += "?" + params.Encode()
-		req, err = http.NewRequest(method, fullURL, nil)
-	case "POST", "DELETE":
-		req, err = http.NewRequest(method, fullURL, strings.NewReader(params.Encode()))
-		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	default:
-		return nil, fmt.Errorf("unsupported HTTP method: %s", method)
-	}
-
+func (bh *BinanceHandler) getPricePrecisionAndTickSize() (float64, float64, error) {
+	var tickSize float64
+	var stepSize float64
+	exInfo, err := bh.client.NewExchangeInfoService().Do(bh.ctx)
 	if err != nil {
-		return nil, fmt.Errorf("error creating request: %w", err)
+		return 0, 0, err
 	}
-
-	if needsAuth {
-		req.Header.Set("X-MBX-APIKEY", bh.apiKey)
-	}
-
-	resp, err := bh.client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("error sending request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("error reading response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		var apiError BinanceAPIError
-		if err := json.Unmarshal(body, &apiError); err == nil {
-			return nil, fmt.Errorf("binance API error: %d - %s", apiError.Code, apiError.Msg)
+	for _, symbol := range exInfo.Symbols {
+		if symbol.Symbol == BTCUSDT {
+			for _, filter := range symbol.Filters {
+				if filter["filterType"] == "PRICE_FILTER" {
+					tickSizef, err := strconv.ParseFloat(filter["tickSize"].(string), 64)
+					if err != nil {
+						return 0, 0, err
+					}
+					tickSize = tickSizef
+				}
+				if filter["filterType"] == "LOT_SIZE" {
+					stepSizef, err := strconv.ParseFloat(filter["stepSize"].(string), 64)
+					if err != nil {
+						return 0, 0, err
+					}
+					stepSize = stepSizef
+				}
+				if tickSize != 0 && stepSize != 0 {
+					return stepSize, tickSize, nil
+				}
+			}
 		}
-		return nil, fmt.Errorf("HTTP error: %d - %s", resp.StatusCode, string(body))
+	}
+	return 0, 0, fmt.Errorf("symbol or price filter not found")
+}
+func countDecimalPlaces(tickSize float64) int {
+	str := strconv.FormatFloat(tickSize, 'f', -1, 64)
+	if i := strings.IndexByte(str, '.'); i > -1 {
+		return len(str) - i - 1
+	}
+	return 0
+}
+
+func (bh *BinanceHandler) ExecuteBatchOrder(s *BinanceSignal, price float64, qty float64, stepSize float64, tickSize float64) error {
+	//ws setup
+	listenKey, err := bh.client.NewStartUserStreamService().Do(bh.ctx)
+	if err != nil {
+		return err
 	}
 
-	return body, nil
+	doneC := make(chan struct{})
+	wsHandler := func(event *futures.WsUserDataEvent) {
+		jsonBytes, err := json.MarshalIndent(event, "", "  ")
+		if err != nil {
+			fmt.Println("error:", err)
+			return
+		}
+
+		var parsedEvent types.UserDataEvent
+		if err := json.Unmarshal(jsonBytes, &parsedEvent); err != nil {
+			fmt.Println("error:", err)
+			return
+		}
+		fmt.Printf("Parsed event: %+v\n", parsedEvent)
+	}
+
+	errHandler := func(err error) {
+		fmt.Println("WebSocket error:", err)
+	}
+
+	go func() {
+		_, _, err := futures.WsUserDataServe(listenKey, wsHandler, errHandler)
+		if err != nil {
+			fmt.Println("WebSocket serve error:", err)
+		}
+	}()
+
+	orders := make([]*futures.CreateOrderService, 0, 3)
+	finalPrice := math.Round(price/tickSize) * tickSize
+	decimals := countDecimalPlaces(tickSize)
+	priceStr := strconv.FormatFloat(finalPrice, 'f', decimals, 64)
+	fmt.Println("PRICE  MAIN:", priceStr)
+	finalQty := math.Round(qty/stepSize) * stepSize
+	qtyDecimals := countDecimalPlaces(stepSize)
+	qtyStr := strconv.FormatFloat(finalQty, 'f', qtyDecimals, 64)
+	fmt.Println("Quantity: ", qtyStr)
+	var mOrder types.OpenOrder
+	if strings.ToUpper(s.Action) == "BUY" {
+		mOrder.Side = futures.SideTypeBuy
+	} else {
+		mOrder.Side = futures.SideTypeSell
+	}
+	mOrder.Symbol = s.Symbol
+	mOrder.Type = futures.OrderType(strings.ToUpper(s.Type)) // OrderTypeLimit OrderTypeMarket
+	mOrder.Price = priceStr
+	mOrder.TimeInForce = futures.TimeInForceTypeGTC
+	mOrder.Quantity = qtyStr
+	mOrderService := bh.CreateOrderLimitMarket(mOrder)
+	orders = append(orders, mOrderService)
+
+	var tpOrder types.OpenOrder
+	var tpslSide futures.SideType
+	if strings.ToUpper(s.Action) == "BUY" {
+		tpslSide = futures.SideTypeSell
+	} else {
+		tpslSide = futures.SideTypeBuy
+	}
+
+	tpPrice, slPrice, calcErr := bh.calculateTPSLPrice(price, s.Action, s.TP, s.SL)
+	if calcErr != nil {
+		return calcErr
+	}
+	tpPriceFinal := math.Round(tpPrice/tickSize) * tickSize
+	slPriceFinal := math.Round(slPrice/tickSize) * tickSize
+	tpPriceStr := strconv.FormatFloat(tpPriceFinal, 'f', decimals, 64)
+	slPriceStr := strconv.FormatFloat(slPriceFinal, 'f', decimals, 64)
+	fmt.Println("PRICE  TP:", tpPriceStr)
+	fmt.Println("PRICE  SL:", slPriceStr)
+	tpOrder.Symbol = s.Symbol
+	tpOrder.Side = futures.SideType(tpslSide) // SideTypeBuy SideTypeSell
+	tpOrder.Type = futures.OrderType("TAKE_PROFIT")
+	tpOrder.Price = tpPriceStr
+	tpOrder.ReduceOnly = true
+	tpOrder.TimeInForce = futures.TimeInForceTypeGTC
+	tpOrder.StopPrice = tpPriceStr
+	tpOrder.Quantity = qtyStr
+	tpOrderService := bh.CreateOrderLimitMarket(tpOrder)
+	orders = append(orders, tpOrderService)
+
+	var slOrder types.OpenOrder
+	slOrder.Symbol = s.Symbol
+	slOrder.Side = futures.SideType(tpslSide) // SideTypeBuy SideTypeSell
+	slOrder.Type = futures.OrderType("STOP")  // OrderTypeLimit OrderTypeMarket
+	slOrder.Price = slPriceStr
+	slOrder.TimeInForce = futures.TimeInForceTypeGTC
+	slOrder.StopPrice = slPriceStr
+	slOrder.Quantity = qtyStr
+	slOrder.ReduceOnly = true
+	slOrderService := bh.CreateOrderLimitMarket(slOrder)
+	orders = append(orders, slOrderService)
+
+	res, err := bh.client.NewCreateBatchOrdersService().OrderList(orders).Do(bh.ctx)
+	if err != nil {
+		return err
+	}
+	for _, e := range res.Errors {
+		if e != nil {
+			return e
+		}
+	}
+	bh.logger.Info("Orders placed successfully", "res", res)
+
+	ticker := time.NewTicker(50 * time.Minute)
+	go func() {
+		for {
+			select {
+			case <-ticker.C:
+				err := bh.client.NewKeepaliveUserStreamService().ListenKey(listenKey).Do(bh.ctx)
+				if err != nil {
+					fmt.Println("Keepalive error:", err)
+				}
+			case <-doneC:
+				ticker.Stop()
+				return
+			}
+		}
+	}()
+
+	return nil
+}
+
+func (bh *BinanceHandler) calculateTPSLPrice(price float64, action string, tp float64, sl float64) (float64, float64, error) {
+	var tpPrice float64
+	var slPrice float64
+	switch strings.ToUpper(action) {
+	case "BUY":
+		tpPrice = price * (1 + tp)
+		slPrice = price * (1 - sl)
+	case "SELL":
+		tpPrice = price * (1 - tp)
+		slPrice = price * (1 + sl)
+	default:
+		return 0, 0, errUnsupportedSide
+	}
+	return tpPrice, slPrice, nil
+}
+
+func (bh *BinanceHandler) CreateOrderLimitMarket(args types.OpenOrder) *futures.CreateOrderService {
+	order := bh.client.NewCreateOrderService()
+	if args.Symbol != "" {
+		order = order.Symbol(args.Symbol)
+	}
+
+	if args.Side != "" {
+		order = order.Side(args.Side)
+	}
+
+	if args.Type != "" {
+		order = order.Type(args.Type)
+	}
+
+	if args.Quantity != "" {
+		order = order.Quantity(args.Quantity)
+	}
+
+	if args.Price != "" {
+		order = order.Price(args.Price)
+	}
+
+	if args.WorkingType != "" {
+		order = order.WorkingType(args.WorkingType)
+	}
+	if args.StopPrice != "" {
+		order = order.StopPrice(args.StopPrice)
+	}
+
+	order = order.TimeInForce(args.TimeInForce)
+	order = order.ReduceOnly(args.ReduceOnly)
+
+	if args.ClosePosition != "" {
+		var v bool
+		v = false
+		if args.ClosePosition == "true" {
+			v = true
+		}
+		order = order.ClosePosition(v)
+	}
+	return order
+}
+
+func (bh *BinanceHandler) CancelAllOpenOrders(symbol string) error {
+	return bh.client.NewCancelAllOpenOrdersService().Symbol(symbol).Do(bh.ctx)
+}
+
+func (bh *BinanceHandler) getFinalQty(totalBalance float64, leverage int64, price float64) float64 {
+	availBalance := EQUITY_PERCENTAGE * totalBalance  // Available balance with risk management
+	notionalValue := availBalance * float64(leverage) // Total position value with leverage
+	return notionalValue / price                      // Convert to quantity in base asset
 }
 
 // handleLeverage returns an error. This method set the leverage for the account. It is not order specific
 func (bh *BinanceHandler) handleLeverage(symbol string, leverage int64) error {
+	fmt.Println("client credentials:", bh.client.APIKey, bh.client.SecretKey, bh.client.BaseURL)
 	res, err := bh.client.NewChangeLeverageService().Symbol(symbol).Leverage(int(leverage)).Do(bh.ctx)
 	if err != nil {
 		bh.logger.Error("[BinanceHandler] failed to set leverage, err=%v", err)
@@ -238,489 +372,40 @@ func (bh *BinanceHandler) handleLeverage(symbol string, leverage int64) error {
 	return nil
 }
 
-func (bh *BinanceHandler) generateSignature(queryString string) string {
-	h := hmac.New(sha256.New, []byte(bh.secret))
-	h.Write([]byte(queryString))
-	return hex.EncodeToString(h.Sum(nil))
-}
+// 	h := hmac.New(sha256.New, []byte(bh.secret))
+// 	h.Write([]byte(queryString))
+// 	return hex.EncodeToString(h.Sum(nil))
+// }
 
 func (bh *BinanceHandler) FetchCurrPrice(symbol string) (float64, error) {
 	res, err := bh.client.NewPremiumIndexService().Symbol(symbol).Do(bh.ctx)
 	if err != nil {
 		return 0, err
 	}
-	fmt.Println("FETCH PRICE RES: ", res)
-	return 0, nil
+	for _, r := range res {
+		jsonData, err := json.Marshal(r)
+		if err != nil {
+			fmt.Printf("Error marshaling to JSON: %v\n", err)
+			continue
+		}
+		fmt.Println(string(jsonData))
+	}
+	indexPrice, convErr := strconv.ParseFloat(res[0].MarkPrice, 64)
+	if convErr != nil {
+		return 0, convErr
+	}
+	return indexPrice, nil
 }
 
 func (bh *BinanceHandler) GetAccountBalance() (float64, error) {
-	endpoint := "/fapi/v2/balance"
-	timestamp := fmt.Sprintf("%d", time.Now().UnixMilli())
-
-	// Create the query string
-	queryString := fmt.Sprintf("timestamp=%s", timestamp)
-
-	// Create the signature
-	signature := bh.generateSignature(queryString)
-
-	// Construct the full URL
-	fullURL := fmt.Sprintf("%s%s?%s&signature=%s", BASE, endpoint, queryString, signature)
-
-	// Create and send the request
-	req, err := http.NewRequest("GET", fullURL, nil)
-	if err != nil {
-		return 0, fmt.Errorf("error creating request: %w", err)
-	}
-
-	req.Header.Set("X-MBX-APIKEY", bh.apiKey)
-
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		return 0, fmt.Errorf("error sending request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	// Read and return the response body
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return 0, fmt.Errorf("error reading response: %w", err)
-	}
-
-	usdtBalance, err := GetUSDTBalance(body)
+	res, err := bh.client.NewGetAccountService().Do(bh.ctx)
 	if err != nil {
 		return 0, err
 	}
-
-	fmt.Println("USDT BALANCE: ", usdtBalance)
-
-	return usdtBalance, nil
-}
-
-func (bh *BinanceHandler) ExecuteMainOrder(s *BinanceSignal, price float64, quantity string) error {
-	endpoint := "/fapi/v1/order"
-	params := url.Values{}
-	timestamp := strconv.FormatInt(time.Now().UnixMilli(), 10)
-	params.Add("timestamp", timestamp)
-	params.Add("symbol", s.Symbol)
-	params.Add("side", s.Action)
-	params.Add("type", "LIMIT")
-	params.Add("timeInForce", "GTC")
-	params.Add("quantity", quantity)
-	params.Add("price", strconv.FormatFloat(price, 'f', 2, 64))
-
-	// Create the query string without the signature
-	queryString := params.Encode()
-
-	// Generate the signature
-	signature := bh.generateSignature(queryString)
-
-	// Construct the full URL with the query string and signature
-	fullURL := BASE + endpoint
-
-	reqBody := queryString + "&signature=" + signature
-
-	req, err := http.NewRequest("POST", fullURL, strings.NewReader(reqBody))
-	if err != nil {
-		return fmt.Errorf("error generating request: %v", err)
+	bal, balErr := strconv.ParseFloat(res.AvailableBalance, 64)
+	if balErr != nil {
+		return 0, balErr
 	}
 
-	// Add necessary headers
-	req.Header.Add("X-MBX-APIKEY", bh.apiKey)
-	req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
-
-	resp, err := bh.client.Do(req)
-	if err != nil {
-		return fmt.Errorf("error sending request: %v", err)
-	}
-	defer resp.Body.Close()
-
-	// Read the response body
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("error reading response: %v", err)
-	}
-
-	// Print the response
-	fmt.Println("Main Order Response:", string(body))
-
-	var orderResp OrderResponse
-	if err := json.Unmarshal(body, &orderResp); err != nil {
-		return fmt.Errorf("error parsing order response: %w", err)
-	}
-	bh.logger.Info("Main order placed",
-		"orderId", orderResp.OrderId,
-		"symbol", s.Symbol,
-		"side", s.Action,
-	)
-	bh.executedOrders[0] = orderResp.OrderId
-	return nil
-}
-
-// In your main function or wherever you're handling the response:
-func GetUSDTBalance(body []byte) (float64, error) {
-	var balances []BalanceResp
-	if err := json.Unmarshal(body, &balances); err != nil {
-		return 0, fmt.Errorf("error unmarshaling balance array: %w", err)
-	}
-
-	// Find USDT balance
-	for _, balance := range balances {
-		if balance.Asset == "USDT" {
-			// Try crossWalletBalance first, then walletBalance, then balance
-			balanceStr := balance.CrossWalletBalance
-			if balanceStr == "" {
-				balanceStr = balance.WalletBalance
-			}
-			if balanceStr == "" {
-				balanceStr = balance.Balance
-			}
-
-			val, err := strconv.ParseFloat(balanceStr, 64)
-			if err != nil {
-				return 0, fmt.Errorf("error parsing USDT balance: %w", err)
-			}
-			return val, nil
-		}
-	}
-
-	return 0, fmt.Errorf("USDT balance not found in response")
-}
-
-// func (bh *BinanceHandler) ExecuteTPOrder(s *BinanceSignal, price float64, quantity string) error {
-// 	var tpPrice float64
-// 	if s.Action == "BUY" {
-// 		tpPrice = (s.TP + 1.0) * price
-// 	} else {
-// 		tpPrice = (1.0 - s.TP) * price
-// 	}
-// 	var tpAction string
-// 	switch s.Action {
-// 	case "BUY":
-// 		tpAction = "SELL"
-// 	case "SELL":
-// 		tpAction = "BUY"
-// 	}
-// 	fmt.Println("TP PRICE: ", tpPrice, "after conv: ", strconv.FormatFloat(tpPrice, 'f', 1, 64))
-// 	endpoint := "/fapi/v1/order"
-// 	params := url.Values{}
-// 	timestamp := strconv.FormatInt(time.Now().UnixMilli(), 10)
-// 	params.Add("timestamp", timestamp)
-// 	params.Add("symbol", s.Symbol)
-// 	params.Add("side", tpAction)
-// 	params.Add("type", "TAKE_PROFIT")
-// 	params.Add("timeInForce", "GTC")
-// 	params.Add("reduceOnly", strconv.FormatBool(true))
-// 	params.Add("quantity", quantity)
-// 	params.Add("price", strconv.FormatFloat(tpPrice, 'f', 1, 64))
-// 	params.Add("stopPrice", strconv.FormatFloat(tpPrice, 'f', 1, 64))
-
-// 	// Create the query string without the signature
-// 	queryString := params.Encode()
-
-// 	// Generate the signature
-// 	signature := bh.generateSignature(queryString)
-
-// 	// Construct the full URL with the query string and signature
-// 	fullURL := BASE + endpoint
-
-// 	reqBody := queryString + "&signature=" + signature
-
-// 	req, err := http.NewRequest("POST", fullURL, strings.NewReader(reqBody))
-// 	if err != nil {
-// 		return fmt.Errorf("error generating request: %v", err)
-// 	}
-
-// 	// Add necessary headers
-// 	req.Header.Add("X-MBX-APIKEY", bh.apiKey)
-// 	req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
-
-// 	resp, err := bh.client.Do(req)
-// 	if err != nil {
-// 		return fmt.Errorf("error sending request: %v", err)
-// 	}
-// 	defer resp.Body.Close()
-
-// 	// Read the response body
-// 	body, err := io.ReadAll(resp.Body)
-// 	if err != nil {
-// 		return fmt.Errorf("error reading response: %v", err)
-// 	}
-
-// 	var orderResp OrderResponse
-// 	if err := json.Unmarshal(body, &orderResp); err != nil {
-// 		return fmt.Errorf("error parsing order response: %w", err)
-// 	}
-// 	bh.logger.Info("TP order placed",
-// 		"orderId", orderResp.OrderId,
-// 		"symbol", s.Symbol,
-// 		"side", s.Action,
-// 	)
-// 	bh.executedOrders[1] = orderResp.OrderId
-// 	// Print the response
-// 	fmt.Println("TP Order Response:", string(body))
-// 	return nil
-// }
-
-// func (bh *BinanceHandler) ExecuteSLOrder(s *BinanceSignal, price float64, quantity string) error {
-// 	var slPrice float64
-// 	if s.Action == "BUY" {
-// 		slPrice = (1.0 - s.TP) * price
-// 	} else {
-// 		slPrice = (s.TP + 1.0) * price
-// 	}
-// 	var slAction string
-// 	switch s.Action {
-// 	case "BUY":
-// 		slAction = "SELL"
-// 	case "SELL":
-// 		slAction = "BUY"
-// 	}
-// 	endpoint := "/fapi/v1/order"
-// 	params := url.Values{}
-// 	timestamp := strconv.FormatInt(time.Now().UnixMilli(), 10)
-// 	params.Add("timestamp", timestamp)
-// 	params.Add("symbol", s.Symbol)
-// 	params.Add("side", slAction)
-// 	params.Add("timeInForce", "GTC")
-// 	params.Add("type", "STOP")
-// 	params.Add("reduceOnly", strconv.FormatBool(true))
-// 	params.Add("quantity", quantity)
-// 	params.Add("price", strconv.FormatFloat(slPrice, 'f', 1, 64))
-// 	params.Add("stopPrice", strconv.FormatFloat(slPrice, 'f', 1, 64))
-
-// 	// Create the query string without the signature
-// 	queryString := params.Encode()
-
-// 	// Generate the signature
-// 	signature := bh.generateSignature(queryString)
-
-// 	// Construct the full URL with the query string and signature
-// 	fullURL := BASE + endpoint
-
-// 	reqBody := queryString + "&signature=" + signature
-
-// 	req, err := http.NewRequest("POST", fullURL, strings.NewReader(reqBody))
-// 	if err != nil {
-// 		return fmt.Errorf("error generating request: %v", err)
-// 	}
-
-// 	// Add necessary headers
-// 	req.Header.Add("X-MBX-APIKEY", bh.apiKey)
-// 	req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
-
-// 	resp, err := bh.client.Do(req)
-// 	if err != nil {
-// 		return fmt.Errorf("error sending request: %v", err)
-// 	}
-// 	defer resp.Body.Close()
-
-// 	// Read the response body
-// 	body, err := io.ReadAll(resp.Body)
-// 	if err != nil {
-// 		return fmt.Errorf("error reading response: %v", err)
-// 	}
-// 	var orderResp OrderResponse
-// 	if err := json.Unmarshal(body, &orderResp); err != nil {
-// 		return fmt.Errorf("error parsing order response: %w", err)
-// 	}
-// 	bh.logger.Info("SL order placed",
-// 		"orderId", orderResp.OrderId,
-// 		"symbol", s.Symbol,
-// 		"side", s.Action,
-// 	)
-// 	bh.executedOrders[2] = orderResp.OrderId
-// 	// Print the response
-// 	fmt.Println("SL Order Response:", string(body))
-// 	return nil
-// }
-
-// func (bh *BinanceHandler) GetOrder(symbol string, orderId int64) (*types.Order, error) {
-// 	endpoint := "/fapi/v1/order"
-
-// 	// Create parameters
-// 	params := url.Values{}
-// 	params.Add("timestamp", strconv.FormatInt(time.Now().UnixMilli(), 10))
-// 	params.Add("symbol", symbol)
-// 	params.Add("orderId", strconv.FormatInt(orderId, 10))
-
-// 	// Generate signature
-// 	queryString := params.Encode()
-// 	signature := bh.generateSignature(queryString)
-
-// 	// Construct full URL with query string and signature
-// 	fullURL := BASE + endpoint + "?" + queryString + "&signature=" + signature
-
-// 	// Create request
-// 	req, err := http.NewRequest("GET", fullURL, nil)
-// 	if err != nil {
-// 		return nil, fmt.Errorf("error creating request: %w", err)
-// 	}
-
-// 	// Add headers
-// 	req.Header.Add("X-MBX-APIKEY", bh.apiKey)
-
-// 	// Send request
-// 	resp, err := bh.client.Do(req)
-// 	if err != nil {
-// 		return nil, fmt.Errorf("error sending request: %w", err)
-// 	}
-// 	defer resp.Body.Close()
-
-// 	// Read response body
-// 	body, err := io.ReadAll(resp.Body)
-// 	if err != nil {
-// 		return nil, fmt.Errorf("error reading response: %w", err)
-// 	}
-
-// 	// Check for error status
-// 	if resp.StatusCode != http.StatusOK {
-// 		return nil, fmt.Errorf("API error: %s", string(body))
-// 	}
-
-// 	// Parse response
-// 	var order types.Order
-// 	if err := json.Unmarshal(body, &order); err != nil {
-// 		return nil, fmt.Errorf("error parsing response: %w", err)
-// 	}
-
-// 	return &order, nil
-// }
-
-func (bh *BinanceHandler) ValidateQuantity(symbol string, quantity float64) (string, error) {
-	endpoint := "/fapi/v1/exchangeInfo"
-
-	// Send request to get exchange info
-	body, err := bh.sendRequest("GET", endpoint, nil, false)
-	if err != nil {
-		return "", fmt.Errorf("error fetching exchange info: %w", err)
-	}
-
-	// Parse the response
-	var exchangeInfo struct {
-		Symbols []struct {
-			Symbol  string `json:"symbol"`
-			Filters []struct {
-				FilterType string `json:"filterType"`
-				MinQty     string `json:"minQty"`
-				MaxQty     string `json:"maxQty"`
-				StepSize   string `json:"stepSize"`
-				TickSize   string `json:"tickSize"`
-			} `json:"filters"`
-		} `json:"symbols"`
-	}
-
-	if err := json.Unmarshal(body, &exchangeInfo); err != nil {
-		return "", fmt.Errorf("error unmarshaling exchange info: %w", err)
-	}
-
-	// Find the symbol and its lot size filter
-	var lotSizeFilter struct {
-		MinQty   float64
-		MaxQty   float64
-		StepSize float64
-	}
-
-	for _, s := range exchangeInfo.Symbols {
-		if s.Symbol == symbol {
-
-			for _, filter := range s.Filters {
-				fmt.Println("TICK SIZE IS: ", filter.TickSize)
-				if filter.FilterType == "LOT_SIZE" {
-					lotSizeFilter.MinQty, _ = strconv.ParseFloat(filter.MinQty, 64)
-					lotSizeFilter.MaxQty, _ = strconv.ParseFloat(filter.MaxQty, 64)
-					lotSizeFilter.StepSize, _ = strconv.ParseFloat(filter.StepSize, 64)
-					break
-				}
-			}
-			break
-		}
-	}
-
-	round := func(x, unit float64) float64 {
-		return math.Round(x/unit) * unit
-	}
-
-	// Validate the quantity
-	if quantity < lotSizeFilter.MinQty {
-		return "", fmt.Errorf("quantity %f is less than minimum quantity %f", quantity, lotSizeFilter.MinQty)
-	}
-	if quantity > lotSizeFilter.MaxQty {
-		return "", fmt.Errorf("quantity %f is greater than maximum quantity %f", quantity, lotSizeFilter.MaxQty)
-	}
-
-	// Adjust quantity to valid step size
-	validatedQuantity := round(quantity-lotSizeFilter.MinQty, lotSizeFilter.StepSize) + lotSizeFilter.MinQty
-
-	// Ensure the quantity is within bounds after adjustment
-	if validatedQuantity > lotSizeFilter.MaxQty {
-		validatedQuantity = lotSizeFilter.MaxQty
-	}
-
-	remainder := validatedQuantity - lotSizeFilter.MinQty
-	steps := math.Round(remainder / lotSizeFilter.StepSize)
-	expectedQuantity := lotSizeFilter.MinQty + (steps * lotSizeFilter.StepSize)
-
-	// Use a relative tolerance
-	relativeTolerance := 1e-9 // This is a very small relative difference, 0.0000001%
-	if math.Abs(validatedQuantity-expectedQuantity) > math.Max(lotSizeFilter.StepSize*relativeTolerance, 1e-8) {
-		return "", fmt.Errorf("unable to adjust quantity to meet lot size requirements")
-	}
-
-	// If we've made it here, the quantity is valid
-	precision := int(math.Ceil(-math.Log10(lotSizeFilter.StepSize)))
-	return strconv.FormatFloat(validatedQuantity, 'f', precision, 64), nil
-}
-
-func (bh *BinanceHandler) CancelAllOpenOrders(symbol string) error {
-	endpoint := "/fapi/v1/allOpenOrders"
-
-	timestamp := fmt.Sprintf("%d", time.Now().UnixMilli())
-
-	// Create the query string including the symbol
-	queryString := fmt.Sprintf("symbol=%s&timestamp=%s", symbol, timestamp)
-
-	// Create the signature
-	signature := bh.generateSignature(queryString)
-
-	// Construct the full URL
-	fullURL := fmt.Sprintf("%s%s?%s&signature=%s", BASE, endpoint, queryString, signature)
-
-	// Create and send the request
-	req, err := http.NewRequest("DELETE", fullURL, nil)
-	if err != nil {
-		return fmt.Errorf("error creating request: %w", err)
-	}
-
-	req.Header.Set("X-MBX-APIKEY", bh.apiKey)
-
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("error sending request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	// Read and return the response body
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("error reading response: %w", err)
-	}
-
-	// Parse the response
-	var response struct {
-		Code int    `json:"code"`
-		Msg  string `json:"msg"`
-	}
-
-	if err := json.Unmarshal(body, &response); err != nil {
-		return fmt.Errorf("error unmarshaling response: %w", err)
-	}
-
-	// Check for error response
-	if response.Code < 0 {
-		return fmt.Errorf("API error: %d - %s", response.Code, response.Msg)
-	}
-
-	return nil
+	return bal, nil
 }
