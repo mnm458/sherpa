@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -52,9 +54,57 @@ func (a *application) createWSHandler(bh *exchange.BinanceHandler) func(*futures
 		if parsedEvent.Event == types.LISTEN_KEY_EXPIRED_EVENT {
 			a.logger.Info("Listen key expired, creating a new one")
 			a.wsBiReissueListenKey(bh)
-		}
+			if a.CurrBiMainOrders.MainOrder != nil && a.CurrBiMainOrders.TPOrder != nil && a.CurrBiMainOrders.SLOrder != nil {
+				if parsedEvent.Event == types.ORDER_TRADE_UPDATE_EVENT && parsedEvent.OrderTradeUpdate.Status == futures.OrderStatusTypeFilled && parsedEvent.OrderID == a.CurrBiMainOrders.TPOrder.OrderID {
+					a.startReentry(bh)
+				} else if parsedEvent.Event == types.ORDER_TRADE_UPDATE_EVENT && parsedEvent.OrderTradeUpdate.Status == futures.OrderStatusTypeFilled && parsedEvent.OrderID == a.CurrBiMainOrders.SLOrder.OrderID {
+					a.CurrBiMainOrders = types.BiSubmittedOrders{}
+				}
+			}
 
-		a.logOrderUpdate(parsedEvent)
+			a.logOrderUpdate(parsedEvent)
+		}
+	}
+}
+
+func (a *application) createPriceWsHandler(bh *exchange.BinanceHandler) func(*futures.WsMarkPriceEvent) {
+	return func(event *futures.WsMarkPriceEvent) {
+		newPriceStr := event.MarkPrice
+		newPrice, err := strconv.ParseFloat(newPriceStr, 64)
+		if err != nil {
+			fmt.Println("PRICE COVNERSION ERR: ", err)
+			return
+		}
+		fmt.Println("Price update ---->>", event.MarkPrice)
+
+		if (newPrice <= 0.9*a.BiTPStopPrice && newPrice >= a.BiSLStopPrice) || (newPrice >= 1.1*a.BiTPStopPrice && newPrice <= a.BiSLStopPrice) {
+			totBalance, err := bh.GetAccountBalance()
+			if err != nil {
+				a.logger.Error("Failed to get balance", "error", err)
+				return
+			}
+			priceToFloat, _ := strconv.ParseFloat(a.CurrBiMainOrders.MainOrder.Price, 64)
+			qty := bh.GetFinalQty(totBalance, a.CurrBiMainOrders.Signal.Leverage, priceToFloat)
+			a.logger.Info("[BinanceHandler] final quantity calculated", "qty", qty)
+
+			cancelErr := bh.CancelAllOpenOrders(a.CurrBiMainOrders.Signal.Symbol)
+			if cancelErr != nil {
+				a.logger.Error("[BinanceHandler] fialed to cancel open orders", "error", cancelErr)
+			}
+			bh.ExecuteBatchOrder(&a.CurrBiMainOrders.Signal, priceToFloat, qty, a.CurrBiMainOrders.StepSize, a.CurrBiMainOrders.TickSize)
+		}
+	}
+
+}
+
+func (a *application) startReentry(bh *exchange.BinanceHandler) {
+	priceStreamHandler := a.createPriceWsHandler(bh)
+	errHandler := a.createErrorHandler()
+	doneCh, stopCh, err := futures.WsMarkPriceServe(a.CurrBiMainOrders.MainOrder.Symbol, priceStreamHandler, errHandler)
+	_ = doneCh
+	_ = stopCh
+	if err != nil {
+		fmt.Println("ERRROR: ", err)
 	}
 }
 

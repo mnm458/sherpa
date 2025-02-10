@@ -39,6 +39,8 @@ type application struct {
 	secret           string
 	CurrByMainOrder  types.ByMainOrder
 	CurrBiMainOrders types.BiSubmittedOrders
+	BiTPStopPrice    float64
+	BiSLStopPrice    float64
 	TpOrderId        string
 	SlOrderId        string
 	ByOrdersChan     chan types.ByMainOrder

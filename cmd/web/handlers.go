@@ -6,6 +6,8 @@ import (
 	"net/http"
 
 	"github.com/mnm458/sherpa/pkg/exchange"
+
+	"github.com/mnm458/sherpa/pkg/types"
 )
 
 func ping(w http.ResponseWriter, r *http.Request) {
@@ -32,7 +34,7 @@ func (app *application) testBybit(w http.ResponseWriter, r *http.Request) {
 }
 
 func (app *application) testBinance(w http.ResponseWriter, r *http.Request) {
-	err := app.ExchangeHandler.Process(exchange.BinanceSignal{
+	err := app.ExchangeHandler.Process(types.BinanceSignal{
 		Symbol:   "BTCUSDT",
 		Type:     "LIMIT",
 		Action:   "Buy",

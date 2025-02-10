@@ -1,10 +1,13 @@
 package types
 
 import (
+	"fmt"
+
 	"github.com/adshao/go-binance/v2/futures"
 )
 
 const LISTEN_KEY_EXPIRED_EVENT = "listenKeyExpired"
+const ORDER_TRADE_UPDATE_EVENT = "ORDER_TRADE_UPDATE"
 
 type Order struct {
 	AvgPrice            string `json:"avgPrice"`
@@ -84,8 +87,38 @@ type OrderTradeUpdate struct {
 	WorkingType   string `json:"wt"`
 	PositionSide  string `json:"ps"`
 }
+type BinanceSignal struct {
+	Symbol   string  `json:"symbol"`
+	Type     string  `json:"type"`
+	Action   string  `json:"action"`
+	Leverage int64   `json:"leverage"`
+	TP       float64 `json:"tp_level"`
+	SL       float64 `json:"sl_level"`
+}
+
+func (bs BinanceSignal) GetType() string {
+	return bs.Type
+}
+
+func (bs BinanceSignal) GetAction() string {
+	return bs.Action
+}
+func (bs BinanceSignal) GetSymbol() string {
+	return bs.Symbol
+}
+
+func (bs BinanceSignal) GetLeverage() int64 {
+	return bs.Leverage
+}
+func (b BinanceSignal) String() string {
+	return fmt.Sprintf("Symbol: %s, Type: %s, Action: %s, Leverage: %d, TP: %.2f, SL: %.2f",
+		b.Symbol, b.Type, b.Action, b.Leverage, b.TP, b.SL)
+}
 
 type BiSubmittedOrders struct {
+	StepSize  float64
+	TickSize  float64
+	Signal    BinanceSignal
 	MainOrder *futures.Order
 	TPOrder   *futures.Order
 	SLOrder   *futures.Order

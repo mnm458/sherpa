@@ -13,38 +13,6 @@ import (
 	"github.com/mnm458/sherpa/pkg/types"
 )
 
-const (
-	BASE = "https://testnet.binancefuture.com"
-)
-
-type BinanceSignal struct {
-	Symbol   string  `json:"symbol"`
-	Type     string  `json:"type"`
-	Action   string  `json:"action"`
-	Leverage int64   `json:"leverage"`
-	TP       float64 `json:"tp_level"`
-	SL       float64 `json:"sl_level"`
-}
-
-func (bs BinanceSignal) GetType() string {
-	return bs.Type
-}
-
-func (bs BinanceSignal) GetAction() string {
-	return bs.Action
-}
-func (bs BinanceSignal) GetSymbol() string {
-	return bs.Symbol
-}
-
-func (bs BinanceSignal) GetLeverage() int64 {
-	return bs.Leverage
-}
-func (b BinanceSignal) String() string {
-	return fmt.Sprintf("Symbol: %s, Type: %s, Action: %s, Leverage: %d, TP: %.2f, SL: %.2f",
-		b.Symbol, b.Type, b.Action, b.Leverage, b.TP, b.SL)
-}
-
 type BinanceHandler struct {
 	Ctx                 context.Context
 	apiKey              string
@@ -57,38 +25,37 @@ type BinanceHandler struct {
 
 func NewBinanceHandler(ctx context.Context, apiKey string, secret string, submittedOrdersChan chan types.BiSubmittedOrders, logger *slog.Logger) *BinanceHandler {
 	fmt.Println("API KEY + SECRET", apiKey, secret)
-	futures.UseTestnet = true
 	client := futures.NewClient(apiKey, secret)
 	listenKey, err := client.NewStartUserStreamService().Do(ctx)
 	if err != nil {
 		panic("failed to create listen key")
 	}
 
-	wsHandler := func(event *futures.WsUserDataEvent) {
-		jsonBytes, err := json.MarshalIndent(event, "", "  ")
-		if err != nil {
-			fmt.Println("error:", err)
-			return
-		}
+	// wsHandler := func(event *futures.WsUserDataEvent) {
+	// 	jsonBytes, err := json.MarshalIndent(event, "", "  ")
+	// 	if err != nil {
+	// 		fmt.Println("error:", err)
+	// 		return
+	// 	}
 
-		var parsedEvent futures.WsUserDataEvent
-		if err := json.Unmarshal(jsonBytes, &parsedEvent); err != nil {
-			fmt.Println("error:", err)
-			return
-		}
-		fmt.Printf("Parsed event: %+v\n", parsedEvent)
-	}
+	// 	var parsedEvent futures.WsUserDataEvent
+	// 	if err := json.Unmarshal(jsonBytes, &parsedEvent); err != nil {
+	// 		fmt.Println("error:", err)
+	// 		return
+	// 	}
+	// 	fmt.Printf("Parsed event: %+v\n", parsedEvent)
+	// }
 
-	errHandler := func(err error) {
-		fmt.Println("WebSocket error:", err)
-	}
+	// errHandler := func(err error) {
+	// 	fmt.Println("WebSocket error:", err)
+	// }
 
-	go func() {
-		_, _, err := futures.WsUserDataServe(listenKey, wsHandler, errHandler)
-		if err != nil {
-			fmt.Println("WebSocket serve error:", err)
-		}
-	}()
+	// go func() {
+	// 	_, _, err := futures.WsUserDataServe(listenKey, wsHandler, errHandler)
+	// 	if err != nil {
+	// 		fmt.Println("WebSocket serve error:", err)
+	// 	}
+	// }()
 	return &BinanceHandler{
 		Ctx:                 ctx,
 		apiKey:              apiKey,
@@ -101,7 +68,7 @@ func NewBinanceHandler(ctx context.Context, apiKey string, secret string, submit
 }
 
 func (bh *BinanceHandler) Process(s Signal) error {
-	binanceSignal, ok := s.(BinanceSignal)
+	binanceSignal, ok := s.(types.BinanceSignal)
 	if ok {
 		bh.logger.Info("[BinanceHandler] processing signal", "signal", binanceSignal.String())
 	} else {
@@ -126,7 +93,7 @@ func (bh *BinanceHandler) Process(s Signal) error {
 	}
 	bh.logger.Info("[BinanceHandler] account balance calculated", "balance", totBalance)
 
-	qty := bh.getFinalQty(totBalance, binanceSignal.Leverage, price)
+	qty := bh.GetFinalQty(totBalance, binanceSignal.Leverage, price)
 	bh.logger.Info("[BinanceHandler] final quantity calculated", "qty", qty)
 
 	cancelErr := bh.CancelAllOpenOrders(binanceSignal.Symbol)
@@ -193,7 +160,7 @@ func countDecimalPlaces(tickSize float64) int {
 	return 0
 }
 
-func (bh *BinanceHandler) ExecuteBatchOrder(s *BinanceSignal, price float64, qty float64, stepSize float64, tickSize float64) error {
+func (bh *BinanceHandler) ExecuteBatchOrder(s *types.BinanceSignal, price float64, qty float64, stepSize float64, tickSize float64) error {
 
 	orders := make([]*futures.CreateOrderService, 0, 3)
 	finalPrice := math.Round(price/tickSize) * tickSize
@@ -270,7 +237,9 @@ func (bh *BinanceHandler) ExecuteBatchOrder(s *BinanceSignal, price float64, qty
 	}
 	bh.logger.Info("Orders placed successfully", "res", res)
 	var submittedOrders types.BiSubmittedOrders
-
+	submittedOrders.Signal = *s
+	submittedOrders.StepSize = stepSize
+	submittedOrders.TickSize = tickSize
 	for _, order := range res.Orders {
 		if order.Type == futures.OrderType(strings.ToUpper(s.Type)) {
 			submittedOrders.MainOrder = order
@@ -348,7 +317,7 @@ func (bh *BinanceHandler) CancelAllOpenOrders(symbol string) error {
 	return bh.Client.NewCancelAllOpenOrdersService().Symbol(symbol).Do(bh.Ctx)
 }
 
-func (bh *BinanceHandler) getFinalQty(totalBalance float64, leverage int64, price float64) float64 {
+func (bh *BinanceHandler) GetFinalQty(totalBalance float64, leverage int64, price float64) float64 {
 	availBalance := EQUITY_PERCENTAGE * totalBalance  // Available balance with risk management
 	notionalValue := availBalance * float64(leverage) // Total position value with leverage
 	return notionalValue / price                      // Convert to quantity in base asset
@@ -382,11 +351,11 @@ func (bh *BinanceHandler) FetchCurrPrice(symbol string) (float64, error) {
 		}
 		fmt.Println(string(jsonData))
 	}
-	indexPrice, convErr := strconv.ParseFloat(res[0].MarkPrice, 64)
+	markPrice, convErr := strconv.ParseFloat(res[0].MarkPrice, 64)
 	if convErr != nil {
 		return 0, convErr
 	}
-	return indexPrice, nil
+	return markPrice, nil
 }
 
 func (bh *BinanceHandler) GetAccountBalance() (float64, error) {

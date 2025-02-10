@@ -22,20 +22,20 @@ type BybitHandler struct {
 }
 
 type BybitSignal struct {
-	Category    string
-	Symbol      string
-	Side        string
-	PositionIdx int32
-	OrderType   string
-	Quantity    float64
-	Price       float64
-	TimeInForce string
-	TP          float64
-	SL          float64
-	IsLeverage  int8
-	TPOderType  string
-	SLOrderType string
-	Leverage    int64
+	Category    string  `json:"category"`
+	Symbol      string  `json:"symbol"`
+	Side        string  `json:"side"`
+	PositionIdx int32   `json:"position_idx"`
+	OrderType   string  `json:"order_type"`
+	Quantity    float64 `json:"quantity"`
+	Price       float64 `json:"price"`
+	TimeInForce string  `json:"time_in_force"`
+	TP          float64 `json:"tp"`
+	SL          float64 `json:"sl"`
+	IsLeverage  int8    `json:"is_leverage"`
+	TPOderType  string  `json:"tp_order_type"`
+	SLOrderType string  `json:"sl_order_type"`
+	Leverage    int64   `json:"leverage"`
 }
 
 func (bs BybitSignal) GetSymbol() string {
