@@ -166,11 +166,11 @@ func (bh *BinanceHandler) ExecuteBatchOrder(s *types.BinanceSignal, price float6
 	finalPrice := math.Round(price/tickSize) * tickSize
 	decimals := countDecimalPlaces(tickSize)
 	priceStr := strconv.FormatFloat(finalPrice, 'f', decimals, 64)
-	fmt.Println("PRICE  MAIN:", priceStr)
+	// fmt.Println("PRICE  MAIN:", priceStr)
 	finalQty := math.Round(qty/stepSize) * stepSize
 	qtyDecimals := countDecimalPlaces(stepSize)
 	qtyStr := strconv.FormatFloat(finalQty, 'f', qtyDecimals, 64)
-	fmt.Println("Quantity: ", qtyStr)
+	// fmt.Println("Quantity: ", qtyStr)
 	var mOrder types.OpenOrder
 	if strings.ToUpper(s.Action) == "BUY" {
 		mOrder.Side = futures.SideTypeBuy
@@ -201,8 +201,8 @@ func (bh *BinanceHandler) ExecuteBatchOrder(s *types.BinanceSignal, price float6
 	slPriceFinal := math.Round(slPrice/tickSize) * tickSize
 	tpPriceStr := strconv.FormatFloat(tpPriceFinal, 'f', decimals, 64)
 	slPriceStr := strconv.FormatFloat(slPriceFinal, 'f', decimals, 64)
-	fmt.Println("PRICE  TP:", tpPriceStr)
-	fmt.Println("PRICE  SL:", slPriceStr)
+	// fmt.Println("PRICE  TP:", tpPriceStr)
+	// fmt.Println("PRICE  SL:", slPriceStr)
 	tpOrder.Symbol = s.Symbol
 	tpOrder.Side = futures.SideType(tpslSide) // SideTypeBuy SideTypeSell
 	tpOrder.Type = futures.OrderType("TAKE_PROFIT")
@@ -235,18 +235,21 @@ func (bh *BinanceHandler) ExecuteBatchOrder(s *types.BinanceSignal, price float6
 			return e
 		}
 	}
-	bh.logger.Info("Orders placed successfully", "res", res)
+
 	var submittedOrders types.BiSubmittedOrders
 	submittedOrders.Signal = *s
 	submittedOrders.StepSize = stepSize
 	submittedOrders.TickSize = tickSize
 	for _, order := range res.Orders {
 		if order.Type == futures.OrderType(strings.ToUpper(s.Type)) {
+			fmt.Println("MAIN ORDER PLACED", order.ClientOrderID, order.OrderID)
 			submittedOrders.MainOrder = order
 		} else if order.Type == futures.OrderTypeTakeProfit {
 			submittedOrders.TPOrder = order
+			fmt.Println("TP ORDER PLACED", order.ClientOrderID, order.OrderID)
 		} else if order.Type == futures.OrderTypeStop {
 			submittedOrders.SLOrder = order
+			fmt.Println("SL ORDER PLACED", order.ClientOrderID, order.OrderID)
 		}
 	}
 

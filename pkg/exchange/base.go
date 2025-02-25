@@ -23,10 +23,10 @@ type ExchangeStrategy interface {
 
 func NewExchangeHandler(ctx context.Context, exchangeType string, apiKey string, secret string, stage types.Environment, byOrderChan chan types.ByMainOrder, biOrderChan chan types.BiSubmittedOrders, logger *slog.Logger) (ExchangeStrategy, error) {
 	switch exchangeType {
-	case "binance":
+	case types.EXCHANGE_BINANCE:
 		//TODO: add stage to this handler
 		return NewBinanceHandler(ctx, apiKey, secret, biOrderChan, logger), nil
-	case "bybit":
+	case types.EXCHANGE_BYBIT:
 		return NewBybitHandler(ctx, apiKey, secret, stage, byOrderChan, logger), nil
 	default:
 		return nil, errors.New("unsupported exchange")

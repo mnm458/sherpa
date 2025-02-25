@@ -24,7 +24,7 @@ func (app *application) testBybit(w http.ResponseWriter, r *http.Request) {
 		Leverage:    5,
 		PositionIdx: 0,
 		TP:          0.001,
-		SL:          0.0019,
+		SL:          0.019,
 	})
 	if err != nil {
 		fmt.Println(err)
@@ -37,9 +37,9 @@ func (app *application) testBinance(w http.ResponseWriter, r *http.Request) {
 	err := app.ExchangeHandler.Process(types.BinanceSignal{
 		Symbol:   "BTCUSDT",
 		Type:     "LIMIT",
-		Action:   "Buy",
+		Action:   "Sell",
 		Leverage: 5,
-		TP:       0.01,
+		TP:       0.001,
 		SL:       0.019,
 	})
 	if err != nil {
@@ -61,4 +61,8 @@ func (app *application) HandleSignal(w http.ResponseWriter, r *http.Request) {
 		fmt.Println(err)
 	}
 	w.WriteHeader(http.StatusOK)
+}
+
+func (app *application) TriggerReentryBybit(w http.ResponseWriter, r *http.Request) {
+
 }
