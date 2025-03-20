@@ -213,7 +213,7 @@ func (bh *BybitHandler) PlaceOrder(category string, symbol string, side string, 
 	if unmarshalErr := json.Unmarshal(jsonData, &serverResp); unmarshalErr != nil {
 		return "", unmarshalErr
 	}
-	bh.mainOrderChan <- types.ByMainOrder{
+	mainOrder := types.ByMainOrder{
 		Category:   category,
 		Symbol:     symbol,
 		Side:       side,
@@ -224,6 +224,8 @@ func (bh *BybitHandler) PlaceOrder(category string, symbol string, side string, 
 		StopLoss:   slPrice,
 		Precision:  precision,
 	}
+	fmt.Println("SENDING THIS TO THE CHANNEL: ", mainOrder)
+	bh.mainOrderChan <- mainOrder
 	return serverResp.Result.OrderId, nil
 
 }

@@ -133,6 +133,7 @@ func (a *application) receive(message string, handler *exchange.BybitHandler) {
 	}
 
 	for _, order := range orderResp.Data {
+
 		switch order.CreateType {
 		case CREATE_TYPE_TP:
 			if order.Status == STATUS_FILLED {
