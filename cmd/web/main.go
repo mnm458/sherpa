@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/mnm458/sherpa/internal/logger"
+	"github.com/mnm458/sherpa/pkg/exchange"
 	"github.com/mnm458/sherpa/pkg/types"
 )
 
@@ -23,6 +24,7 @@ type Config struct {
 	Environment   types.Environment
 	Logger        *slog.Logger
 	ReEntrySwitch bool
+	ExchangeID    int32
 }
 
 func main() {
@@ -39,6 +41,7 @@ func main() {
 	if app == nil {
 		log.Fatal("app initialization failed")
 	}
+	app.ExchangeID = cfg.ExchangeID
 
 	// Start exchange-specific services
 	go func() {
@@ -99,22 +102,24 @@ func main() {
 
 func parseFlags() (Config, error) {
 	addr := flag.String("addr", ":4000", "HTTP network address")
-	exchange := flag.String("exchange", "", "Exchange name")
+	ex := flag.String("exchange", "", "Exchange name")
 	env := flag.String("env", "", "Environment (TEST/PROD)")
 	reEntrySwitch := flag.Bool("reEntrySwitch", true, "ReEntrySwitch") //by default keep the switch on
 
 	flag.Parse()
 
-	if *exchange == "" || *env == "" {
+	if *ex == "" || *env == "" {
 		return Config{}, fmt.Errorf("exchange and environment flags are required")
 	}
-
-	exchangeUpper := strings.ToUpper(*exchange)
+	exchangeUpper := strings.ToUpper(*ex)
+	var exchangeID int32
 	switch exchangeUpper {
-	case types.EXCHANGE_BYBIT, types.EXCHANGE_BINANCE:
-		// valid
+	case types.EXCHANGE_BYBIT:
+		exchangeID = exchange.BYBIT_EXCHANGE_ID
+	case types.EXCHANGE_BINANCE:
+		exchangeID = exchange.BINANCE_EXCHANGE_ID
 	default:
-		return Config{}, fmt.Errorf("invalid exchange: %s (must be BYBIT or BINANCE)", *exchange)
+		return Config{}, fmt.Errorf("invalid exchange: %s (must be BYBIT or BINANCE)", *ex)
 	}
 
 	// Convert to uppercase and validate environment
@@ -135,5 +140,6 @@ func parseFlags() (Config, error) {
 		Exchange:      exchangeUpper,
 		Environment:   environment,
 		ReEntrySwitch: *reEntrySwitch,
+		ExchangeID:    exchangeID,
 	}, nil
 }
