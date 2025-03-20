@@ -46,6 +46,7 @@ type application struct {
 	ActiveExchange   string
 	wsStopChannels   map[string]chan struct{}
 	wsMutex          sync.Mutex
+	ExchangeID       int32
 }
 
 func NewApplication(ctx context.Context, cfg Config) *application {

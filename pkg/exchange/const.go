@@ -3,9 +3,11 @@ package exchange
 import "errors"
 
 const (
-	ACTION_LONG = "long"
-	TYPE_OPEN   = "open"
-	BTCUSDT     = "BTCUSDT"
+	ACTION_LONG         = "long"
+	TYPE_OPEN           = "open"
+	BTCUSDT             = "BTCUSDT"
+	BYBIT_EXCHANGE_ID   = 1
+	BINANCE_EXCHANGE_ID = 2
 )
 
 var (

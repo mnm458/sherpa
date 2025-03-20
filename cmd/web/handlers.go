@@ -50,17 +50,29 @@ func (app *application) testBinance(w http.ResponseWriter, r *http.Request) {
 }
 
 func (app *application) HandleSignal(w http.ResponseWriter, r *http.Request) {
-	var signal exchange.Signal
-	err := json.NewDecoder(r.Body).Decode(&signal)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
+	switch app.ExchangeID {
+	case exchange.BYBIT_EXCHANGE_ID:
+		var signal exchange.BybitSignal
+		err := json.NewDecoder(r.Body).Decode(&signal)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		err = app.ExchangeHandler.Process(signal)
+		if err != nil {
+			fmt.Println(err)
+		}
+		w.WriteHeader(http.StatusOK)
+	case exchange.BINANCE_EXCHANGE_ID:
+		var signal types.BinanceSignal
+		err := json.NewDecoder(r.Body).Decode(&signal)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		err = app.ExchangeHandler.Process(signal)
+
 	}
-	err = app.ExchangeHandler.Process(signal)
-	if err != nil {
-		fmt.Println(err)
-	}
-	w.WriteHeader(http.StatusOK)
 }
 
 func (app *application) TriggerReentryBybit(w http.ResponseWriter, r *http.Request) {
