@@ -18,10 +18,11 @@ import (
 )
 
 type Config struct {
-	Addr        string
-	Exchange    string
-	Environment types.Environment
-	Logger      *slog.Logger
+	Addr          string
+	Exchange      string
+	Environment   types.Environment
+	Logger        *slog.Logger
+	ReEntrySwitch bool
 }
 
 func main() {
@@ -41,18 +42,20 @@ func main() {
 
 	// Start exchange-specific services
 	go func() {
-		var err error
-		switch cfg.Exchange {
-		case types.EXCHANGE_BYBIT:
-			go app.ListenForByOrderUpdates(ctx)
-			app.WSByConnect(app.wsURL, app.ExchangeHandler)
-		case types.EXCHANGE_BINANCE:
-			go app.ListenForBiOrderUpdates(ctx)
-			err = app.WSBiConnect(ctx, app.ExchangeHandler)
-		}
-		if err != nil {
-			app.logger.Error("websocket error", slog.String("error", err.Error()))
-			cancel()
+		if cfg.ReEntrySwitch {
+			var err error
+			switch cfg.Exchange {
+			case types.EXCHANGE_BYBIT:
+				go app.ListenForByOrderUpdates(ctx)
+				app.WSByConnect(app.wsURL, app.ExchangeHandler)
+			case types.EXCHANGE_BINANCE:
+				go app.ListenForBiOrderUpdates(ctx)
+				err = app.WSBiConnect(ctx, app.ExchangeHandler)
+			}
+			if err != nil {
+				app.logger.Error("websocket error", slog.String("error", err.Error()))
+				cancel()
+			}
 		}
 	}()
 
@@ -98,6 +101,7 @@ func parseFlags() (Config, error) {
 	addr := flag.String("addr", ":4000", "HTTP network address")
 	exchange := flag.String("exchange", "", "Exchange name")
 	env := flag.String("env", "", "Environment (TEST/PROD)")
+	reEntrySwitch := flag.Bool("reEntrySwitch", true, "ReEntrySwitch") //by default keep the switch on
 
 	flag.Parse()
 
@@ -127,8 +131,9 @@ func parseFlags() (Config, error) {
 	}
 
 	return Config{
-		Addr:        *addr,
-		Exchange:    exchangeUpper,
-		Environment: environment,
+		Addr:          *addr,
+		Exchange:      exchangeUpper,
+		Environment:   environment,
+		ReEntrySwitch: *reEntrySwitch,
 	}, nil
 }
