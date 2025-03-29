@@ -3,6 +3,7 @@ package logger
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -33,7 +34,8 @@ func NewPrettyHandler(out io.Writer, opts *PrettyHandlerOptions) *PrettyHandler 
 
 func (h *PrettyHandler) Handle(ctx context.Context, r slog.Record) error {
 	// Extract file and line number from source
-	var file, line string
+	var file string
+	var line int
 	if r.PC != 0 {
 		frames := runtime.CallersFrames([]uintptr{r.PC})
 		frame, _ := frames.Next()
@@ -41,14 +43,14 @@ func (h *PrettyHandler) Handle(ctx context.Context, r slog.Record) error {
 		if idx := strings.LastIndexByte(file, '/'); idx >= 0 {
 			file = file[idx+1:]
 		}
-		line = string(rune(frame.Line))
+		line = frame.Line
 	}
 
 	// Create a map for the formatted log
 	logMap := map[string]interface{}{
 		"level": r.Level.String(),
 		"msg":   r.Message,
-		"file":  file + ":" + line,
+		"file":  fmt.Sprintf("%s:%d", file, line),
 	}
 
 	// Add attributes
