@@ -4,262 +4,334 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"runtime/debug"
 	"strconv"
-	"sync"
 	"time"
 
 	"github.com/adshao/go-binance/v2/futures"
+	"github.com/gorilla/websocket"
 	"github.com/mnm458/sherpa/pkg/exchange"
 	"github.com/mnm458/sherpa/pkg/types"
 )
 
-// func (a *application) WSBiConnect(ctx context.Context, eh exchange.ExchangeStrategy) error {
-// 	bh, ok := eh.(*exchange.BinanceHandler)
-// 	if !ok {
-// 		return fmt.Errorf("incorrect handler passed for ws connect")
-// 	}
+func (a *application) WSBiConnectTest(ctx context.Context, eh exchange.ExchangeStrategy) error {
+	bh, ok := eh.(*exchange.BinanceHandler)
+	if !ok {
+		return fmt.Errorf("incorrect handler passed for ws connect")
+	}
+	// Create a cancellable context
+	streamCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	for {
 
-// 	// Start WebSocket connection
-// 	doneCh, stopCh, err := a.startWebSocketConnection(bh)
-// 	if err != nil {
-// 		return fmt.Errorf("failed to start websocket: %w", err)
-// 	}
-// 	defer close(stopCh)
+		if err := a.wsBiReissueListenKey(bh); err != nil {
+			a.logger.Error("Failed to get listen key", "error", err)
+			time.Sleep(5 * time.Second)
+			continue
+		}
+		a.logger.Info("Connecting to Binance WebSocket", "listenKey", bh.ListenKey, "time", time.Now())
+		wsURL := fmt.Sprintf("wss://fstream.binance.com/ws/%s", bh.ListenKey)
 
-// 	// Start keepalive service
-// 	keepaliveDone := a.startKeepaliveService(ctx, bh)
-// 	defer func() {
-// 		// Wait for keepalive to finish when we exit
-// 		<-keepaliveDone
-// 	}()
+		// Use gorilla/websocket
+		dialer := websocket.Dialer{
+			HandshakeTimeout: 10 * time.Second,
+		}
+		conn, _, err := dialer.Dial(wsURL, nil)
+		if err != nil {
+			a.logger.Error("WebSocket connection failed", "error", err)
+			time.Sleep(5 * time.Second)
+			continue
+		}
+		conn.SetPingHandler(func(data string) error {
+			a.logger.Debug("Received ping, sending pong", "time", time.Now())
+			return conn.WriteControl(websocket.PongMessage, []byte(data), time.Now().Add(5*time.Second))
+		})
+		// Start listen key keepalive
+		keepaliveTicker := time.NewTicker(30 * time.Minute)
+		defer keepaliveTicker.Stop()
 
-// 	// Wait for either context cancellation or websocket closure
-// 	select {
-// 	case <-ctx.Done():
-// 		close(stopCh)
-// 		return ctx.Err()
-// 	case <-doneCh:
-// 		return fmt.Errorf("websocket connection closed")
-// 	}
-// }
+		// Create channel for this connection's lifecycle
+		connDone := make(chan struct{})
+
+		go func() {
+			defer close(connDone)
+			defer conn.Close()
+
+			for {
+				_, message, err := conn.ReadMessage()
+				if err != nil {
+					a.logger.Error("WebSocket read error", "error", err)
+					return
+				}
+
+				// Parse the message
+				var event futures.WsUserDataEvent
+				if err := json.Unmarshal(message, &event); err != nil {
+					a.logger.Error("JSON unmarshal error", "error", err)
+					continue
+				}
+
+				// Process event in a non-blocking way
+				go a.createWSHandler(bh)(&event)
+			}
+		}()
+
+		for {
+			select {
+			case <-ctx.Done():
+				conn.Close()
+				return ctx.Err()
+			case <-connDone:
+				a.logger.Warn("WebSocket connection closed, reconnecting...")
+				time.Sleep(2 * time.Second)
+			case <-keepaliveTicker.C:
+				a.logger.Debug("Sending listen key keepalive", "time", time.Now())
+				if err := bh.Client.NewKeepaliveUserStreamService().ListenKey(bh.ListenKey).Do(streamCtx); err != nil {
+					a.logger.Error("Keepalive failed", "error", err)
+					conn.Close()
+					break
+				}
+				continue
+			}
+			break
+		}
+	}
+
+	// func (a *application) createRawWsHandler(bh *exchange.BinanceHandler) func(*custom.Event){
+	// 	return func(event *custom.Event){
+	// 		a.logger.Debug("Received raw event", "event", event)
+	// 	}
+	// }
+
+	// for {
+	// 	// Check if parent context is done
+	// 	select {
+	// 	case <-ctx.Done():
+	// 		return ctx.Err()
+	// 	default:
+	// 	}
+
+	// 	// Get/refresh listen key
+	// 	if err := a.wsBiReissueListenKey(bh); err != nil {
+	// 		a.logger.Error("Failed to get listen key", "error", err)
+	// 		time.Sleep(5 * time.Second)
+	// 		continue
+	// 	}
+
+	// 	// Connect to WebSocket
+	// 	a.logger.Info("Connecting to Binance WebSocket", "listenKey", bh.ListenKey)
+	// 	wsURL := fmt.Sprintf("wss://fstream.binance.com/ws/%s", bh.ListenKey)
+
+	// 	// Use gorilla/websocket
+	// 	dialer := websocket.Dialer{
+	// 		HandshakeTimeout: 10 * time.Second,
+	// 	}
+	// 	conn, _, err := dialer.Dial(wsURL, nil)
+	// 	if err != nil {
+	// 		a.logger.Error("WebSocket connection failed", "error", err)
+	// 		time.Sleep(5 * time.Second)
+	// 		continue
+	// 	}
+
+	// 	// Set up proper ping/pong handling
+	// 	conn.SetPingHandler(func(data string) error {
+	// 		a.logger.Debug("Received ping, sending pong")
+	// 		return conn.WriteControl(websocket.PongMessage, []byte(data), time.Now().Add(5*time.Second))
+	// 	})
+
+	// 	// Start listen key keepalive
+	// 	keepaliveTicker := time.NewTicker(30 * time.Minute)
+	// 	defer keepaliveTicker.Stop()
+
+	// 	// Create channel for this connection's lifecycle
+	// 	connDone := make(chan struct{})
+
+	// 	// Start reading messages
+	// 	go func() {
+	// 		defer close(connDone)
+	// 		defer conn.Close()
+
+	// 		for {
+	// 			_, message, err := conn.ReadMessage()
+	// 			if err != nil {
+	// 				a.logger.Error("WebSocket read error", "error", err)
+	// 				return
+	// 			}
+
+	// 			// Parse the message
+	// 			var event futures.WsUserDataEvent
+	// 			if err := json.Unmarshal(message, &event); err != nil {
+	// 				a.logger.Error("JSON unmarshal error", "error", err)
+	// 				continue
+	// 			}
+
+	// 			// Process event in a non-blocking way
+	// 			go a.createWSHandler(bh)(&event)
+	// 		}
+	// 	}()
+
+	// 	// Wait for either context cancellation, connection close, or keepalive
+	// 	select {
+	// 	case <-ctx.Done():
+	// 		conn.Close()
+	// 		return ctx.Err()
+
+	// 	case <-connDone:
+	// 		a.logger.Warn("WebSocket connection closed, reconnecting...")
+	// 		time.Sleep(2 * time.Second)
+
+	// 	case <-keepaliveTicker.C:
+	// 		a.logger.Debug("Sending listen key keepalive")
+	// 		if err := bh.Client.NewKeepaliveUserStreamService().
+	// 			ListenKey(bh.ListenKey).
+	// 			Do(streamCtx); err != nil {
+	// 			a.logger.Error("Keepalive failed", "error", err)
+	// 			conn.Close()
+	// 			time.Sleep(2 * time.Second)
+	// 		}
+	// 	}
+	// }
+}
 
 func (a *application) WSBiConnect(ctx context.Context, eh exchange.ExchangeStrategy) error {
+	fmt.Println("Current time:", time.Now())
 	bh, ok := eh.(*exchange.BinanceHandler)
 	if !ok {
 		return fmt.Errorf("incorrect handler passed for ws connect")
 	}
 
-	// Store the WebSocket channels at the application level
-	var doneCh chan struct{}
-	var stopCh chan struct{}
-	var wsErr error
-
-	// Use a mutex to protect access to WebSocket channels
-	var wsMutex sync.Mutex
-
-	// Create a reconnection function
-	reconnect := func() error {
-		wsMutex.Lock()
-		defer wsMutex.Unlock()
-
-		// Close old channels if they exist
-		if stopCh != nil {
-			close(stopCh)
-			stopCh = nil
+	// Create a context that can be cancelled for each connection attempt
+	for {
+		// Check if main context is done
+		select {
+		case <-ctx.Done():
+			fmt.Println("MAIN CONTEXT DONE")
+			return ctx.Err()
+		default:
+			// Continue with connection attempt
 		}
 
-		// Reissue listen key before reconnection
+		// Get or refresh listen key
 		if err := a.wsBiReissueListenKey(bh); err != nil {
-			return fmt.Errorf("failed to reissue listen key: %w", err)
+			a.logger.Error("[WSBiConnect] failed to get listen key", "error", err)
+			time.Sleep(5 * time.Second) // Wait before retry
+			continue
 		}
 
-		a.logger.Info("starting new websocket connection", "listenKey", bh.ListenKey)
+		a.logger.Info("[WSBiConnect] starting websocket connection", "listenKey", bh.ListenKey)
 
-		// Create WebSocket handler with additional logging
+		// Define event handler
 		wsHandler := func(event *futures.WsUserDataEvent) {
-			a.logger.Debug("received websocket event", "event", event.Event)
+			a.logger.Debug("[WSBiConnect] received websocket event", "event", event.Event)
 			a.createWSHandler(bh)(event)
 		}
 
-		// Create error handler with additional logging
+		// Define error handler
 		errHandler := func(err error) {
-			a.logger.Error("websocket error", "error", err)
-			wsErr = err
-			fmt.Println("wsErr: ", wsErr.Error())
+			fmt.Println("Failure time:", time.Now())
+			a.logger.Error("[WSBiConnect] websocket error", "error", err)
+			// Error will trigger reconnection via doneCh
 		}
 
-		// Start new connection
-		newDoneCh, newStopCh, err := futures.WsUserDataServe(bh.ListenKey, wsHandler, errHandler)
+		// Start keepalive ticker
+		keepaliveTicker := time.NewTicker(30 * time.Minute)
+		defer keepaliveTicker.Stop()
+
+		// Establish WebSocket connection
+		doneCh, stopCh, err := futures.WsUserDataServe(bh.ListenKey, wsHandler, errHandler)
 		if err != nil {
-			return fmt.Errorf("websocket serve error: %w", err)
+			a.logger.Error("[WSBiConnect] failed to start websocket", "error", err)
+			time.Sleep(5 * time.Second) // Wait before retry
+			continue
 		}
 
-		doneCh = newDoneCh
-		stopCh = newStopCh
-		return nil
-	}
+		activeTicker := time.NewTicker(1 * time.Minute)
+		defer activeTicker.Stop()
 
-	// Initial connection
-	if err := reconnect(); err != nil {
-		return err
-	}
+		go func() {
+			pingTicker := time.NewTicker(30 * time.Second)
+			defer pingTicker.Stop()
 
-	// Start ping ticker (every 30 seconds to prevent timeout)
-	pingTicker := time.NewTicker(30 * time.Second)
-	defer pingTicker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-pingTicker.C:
+					// Send a simple application-level request every 30 seconds
+					// This is different from the listen key keepalive
+					a.logger.Debug("[WSBiConnect] sending application ping")
+					err := bh.Client.NewPingService().Do(ctx)
+					if err != nil {
+						a.logger.Error("[WSBiConnect] application ping failed", "error", err)
+					}
+				}
+			}
+		}()
 
-	// Start keepalive service with robust error handling (for listen key renewal)
-	keepaliveTicker := time.NewTicker(30 * time.Minute) // More frequent than Binance's 60-minute expiry
-	defer keepaliveTicker.Stop()
+		go func() {
+			activityTicker := time.NewTicker(10 * time.Second)
+			defer activityTicker.Stop()
 
-	for {
+			lastActivityTime := time.Now()
+
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-activityTicker.C:
+					elapsed := time.Since(lastActivityTime)
+					a.logger.Debug("[WSBiConnect] connection status",
+						"seconds_since_activity", elapsed.Seconds())
+					if elapsed > 55*time.Second {
+						a.logger.Warn("[WSBiConnect] potential inactivity timeout approaching",
+							"seconds_inactive", elapsed.Seconds())
+					}
+					lastActivityTime = time.Now() // Reset for monitoring purposes
+				}
+			}
+		}()
+		// Start a goroutine for keepalive
+		keepaliveDone := make(chan struct{})
+		go func() {
+			defer close(keepaliveDone)
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-keepaliveTicker.C:
+					a.logger.Debug("[WSBiConnect] sending keepalive")
+					if err := bh.Client.NewKeepaliveUserStreamService().
+						ListenKey(bh.ListenKey).
+						Do(ctx); err != nil {
+						a.logger.Error("[WSBiConnect] keepalive failed", "error", err)
+						// Close the connection to trigger reconnect
+						if stopCh != nil {
+							close(stopCh)
+						}
+						return
+					}
+				}
+			}
+		}()
+
+		// Wait for connection to close or context to be cancelled
 		select {
 		case <-ctx.Done():
-			wsMutex.Lock()
 			if stopCh != nil {
 				close(stopCh)
 			}
-			wsMutex.Unlock()
+			<-keepaliveDone // Wait for keepalive goroutine to exit
 			return ctx.Err()
-
 		case <-doneCh:
-			a.logger.Warn("websocket connection closed, attempting to reconnect")
-
-			// Sleep before reconnection to avoid hammering the server
-			time.Sleep(3 * time.Second)
-
-			if err := reconnect(); err != nil {
-				return fmt.Errorf("failed to reconnect: %w", err)
+			// Connection closed, wait for keepalive to finish
+			if stopCh != nil {
+				close(stopCh)
 			}
-
-		case <-pingTicker.C:
-			// This is the ping mechanism to keep the WebSocket connection alive
-			a.logger.Debug("sending ping to keep connection alive")
-
-			// The ping is implemented at the WebSocket protocol level
-			// Since we don't have direct access to the underlying websocket.Conn in the futures library,
-			// we'll use an empty data channel message as a heartbeat
-			// This won't actually send data but indicates activity on our connection
-
-			// Check if connection is still active before attempting anything
-			wsMutex.Lock()
-			if stopCh == nil {
-				// Connection is not active, try reconnecting
-				wsMutex.Unlock()
-				if err := reconnect(); err != nil {
-					a.logger.Error("failed to reconnect during ping cycle", "error", err)
-				}
-				continue
-			}
-			wsMutex.Unlock()
-
-		case <-keepaliveTicker.C:
-			a.logger.Debug("sending keepalive for listen key")
-
-			wsMutex.Lock()
-			currentListenKey := bh.ListenKey
-			wsMutex.Unlock()
-
-			// Send keepalive without holding the lock
-			err := bh.Client.NewKeepaliveUserStreamService().
-				ListenKey(currentListenKey).
-				Do(ctx)
-
-			if err != nil {
-				a.logger.Error("keepalive error", "error", err)
-
-				// If keepalive fails, try reconnecting
-				wsMutex.Lock()
-				if stopCh != nil {
-					close(stopCh)
-					stopCh = nil
-				}
-				wsMutex.Unlock()
-
-				if err := reconnect(); err != nil {
-					return fmt.Errorf("failed to reconnect after keepalive failure: %w", err)
-				}
-			}
+			<-keepaliveDone
+			a.logger.Warn("[WSBiConnect] connection closed, reconnecting...")
+			time.Sleep(2 * time.Second) // Small delay before reconnect
 		}
 	}
 }
-
-func (a *application) sendCustomPing(bh *exchange.BinanceHandler) {
-	// We could implement a custom ping here if Binance provides an API endpoint for this
-	// For now, we'll use the empty cycle in the main loop to indicate connection activity
-	a.logger.Debug("ping cycle executed")
-}
-
-// Modified function for websocket error handling
-func (a *application) createErrorHandler() func(error) {
-	return func(err error) {
-		a.logger.Error("WebSocket error:", "error", err, "stack", debug.Stack())
-	}
-}
-
-func (a *application) startWebSocketConnection(bh *exchange.BinanceHandler) (chan struct{}, chan struct{}, error) {
-	wsHandler := a.createWSHandler(bh)
-	errHandler := a.createErrorHandler()
-
-	doneCh, stopCh, err := futures.WsUserDataServe(bh.ListenKey, wsHandler, errHandler)
-	if err != nil {
-		return nil, nil, fmt.Errorf("websocket serve error: %w", err)
-	}
-
-	return doneCh, stopCh, nil
-}
-
-func (a *application) startKeepaliveService(ctx context.Context, bh *exchange.BinanceHandler) chan struct{} {
-	ticker := time.NewTicker(50 * time.Minute)
-	done := make(chan struct{})
-
-	go func() {
-		defer ticker.Stop()
-		defer close(done)
-
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				if err := bh.Client.NewKeepaliveUserStreamService().
-					ListenKey(bh.ListenKey).
-					Do(ctx); err != nil {
-					a.logger.Error("keepalive error", "error", err)
-				}
-			}
-		}
-	}()
-
-	return done
-}
-
-// func (a *application) WSBiConnect(ctx context.Context, eh exchange.ExchangeStrategy) error {
-// 	bh, ok := eh.(*exchange.BinanceHandler)
-// 	if !ok {
-// 		panic("incorrect handler passed for ws connect")
-// 	}
-
-// 	// Start WebSocket connection
-// 	a.startWebSocketConnection(bh)
-
-// 	// Start keepalive service
-// 	a.startKeepaliveService(bh)
-// 	return nil
-// }
-
-// func (a *application) startWebSocketConnection(bh *exchange.BinanceHandler) {
-// 	wsHandler := a.createWSHandler(bh)
-// 	errHandler := a.createErrorHandler()
-
-// 	go func() {
-// 		_, _, err := futures.WsUserDataServe(bh.ListenKey, wsHandler, errHandler)
-// 		if err != nil {
-// 			a.logger.Error("WebSocket serve error:", "error", err)
-// 		}
-// 	}()
-// }
 
 func (a *application) createWSHandler(bh *exchange.BinanceHandler) func(*futures.WsUserDataEvent) {
 	return func(event *futures.WsUserDataEvent) {
@@ -367,20 +439,6 @@ func (a *application) logOrderUpdate(event futures.WsUserDataEvent) {
 	}
 
 }
-
-// func (a *application) startKeepaliveService(bh *exchange.BinanceHandler) {
-// 	ticker := time.NewTicker(50 * time.Minute)
-
-// 	go func() {
-// 		for range ticker.C {
-// 			if err := bh.Client.NewKeepaliveUserStreamService().
-// 				ListenKey(bh.ListenKey).
-// 				Do(bh.Ctx); err != nil {
-// 				a.logger.Error("Keepalive error:", "error", err)
-// 			}
-// 		}
-// 	}()
-// }
 
 func (a *application) wsBiReissueListenKey(h *exchange.BinanceHandler) error {
 	listenKey, err := h.Client.NewStartUserStreamService().Do(h.Ctx)

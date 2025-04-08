@@ -28,6 +28,7 @@ func NewBinanceHandler(ctx context.Context, apiKey string, secret string, submit
 	client := futures.NewClient(apiKey, secret)
 	listenKey, err := client.NewStartUserStreamService().Do(ctx)
 	if err != nil {
+		fmt.Println("ERROR: ", err)
 		panic("failed to create listen key")
 	}
 

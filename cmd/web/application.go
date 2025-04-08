@@ -60,7 +60,7 @@ func NewApplication(ctx context.Context, cfg Config) *application {
 	if err != nil {
 		panic("cannot load env file")
 	}
-	fmt.Println("EXCHANFGW", cfg.Exchange)
+	fmt.Println("EXCHANGE", cfg.Exchange)
 	switch cfg.Exchange {
 	case types.EXCHANGE_BINANCE:
 		switch cfg.Environment {
@@ -128,7 +128,7 @@ func (a *application) ListenForBiOrderUpdates(ctx context.Context) {
 	a.logger.Info("starting binance order updates listener")
 
 	for order := range a.BiOrdersChan {
-		fmt.Println("got a bybit main order ======>", order)
+		fmt.Println("got a binance main order ======>", order)
 		a.CurrBiMainOrders = order
 	}
 	a.logger.Info("binance order updates listener stopped")
