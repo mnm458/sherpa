@@ -53,7 +53,7 @@ func main() {
 				app.WSByConnect(app.wsURL, app.ExchangeHandler)
 			case types.EXCHANGE_BINANCE:
 				go app.ListenForBiOrderUpdates(ctx)
-				err = app.WSBiConnectTest(ctx, app.ExchangeHandler)
+				err = app.SetupWebSockets(ctx, app.ExchangeHandler)
 			}
 			if err != nil {
 				app.logger.Error("websocket error", slog.String("error", err.Error()))

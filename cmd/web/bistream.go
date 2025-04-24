@@ -4,7 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strconv"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/adshao/go-binance/v2/futures"
@@ -13,348 +16,52 @@ import (
 	"github.com/mnm458/sherpa/pkg/types"
 )
 
-func (a *application) WSBiConnectTest(ctx context.Context, eh exchange.ExchangeStrategy) error {
+func (a *application) SetupWebSockets(ctx context.Context, eh exchange.ExchangeStrategy) error {
 	bh, ok := eh.(*exchange.BinanceHandler)
 	if !ok {
-		return fmt.Errorf("incorrect handler passed for ws connect")
+		return fmt.Errorf("exchange is not a BinanceHandler")
 	}
-	// Create a cancellable context
-	streamCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	for {
-
-		if err := a.wsBiReissueListenKey(bh); err != nil {
-			a.logger.Error("Failed to get listen key", "error", err)
-			time.Sleep(5 * time.Second)
-			continue
-		}
-		a.logger.Info("Connecting to Binance WebSocket", "listenKey", bh.ListenKey, "time", time.Now())
-		wsURL := fmt.Sprintf("wss://fstream.binance.com/ws/%s", bh.ListenKey)
-
-		// Use gorilla/websocket
-		dialer := websocket.Dialer{
-			HandshakeTimeout: 10 * time.Second,
-		}
-		conn, _, err := dialer.Dial(wsURL, nil)
-		if err != nil {
-			a.logger.Error("WebSocket connection failed", "error", err)
-			time.Sleep(5 * time.Second)
-			continue
-		}
-		conn.SetPingHandler(func(data string) error {
-			a.logger.Debug("Received ping, sending pong", "time", time.Now())
-			return conn.WriteControl(websocket.PongMessage, []byte(data), time.Now().Add(5*time.Second))
-		})
-		// Start listen key keepalive
-		keepaliveTicker := time.NewTicker(30 * time.Minute)
-		defer keepaliveTicker.Stop()
-
-		// Create channel for this connection's lifecycle
-		connDone := make(chan struct{})
-
-		go func() {
-			defer close(connDone)
-			defer conn.Close()
-
-			for {
-				_, message, err := conn.ReadMessage()
-				if err != nil {
-					a.logger.Error("WebSocket read error", "error", err)
-					return
-				}
-
-				// Parse the message
-				var event futures.WsUserDataEvent
-				if err := json.Unmarshal(message, &event); err != nil {
-					a.logger.Error("JSON unmarshal error", "error", err)
-					continue
-				}
-
-				// Process event in a non-blocking way
-				go a.createWSHandler(bh)(&event)
-			}
-		}()
-
-		for {
-			select {
-			case <-ctx.Done():
-				conn.Close()
-				return ctx.Err()
-			case <-connDone:
-				a.logger.Warn("WebSocket connection closed, reconnecting...")
-				time.Sleep(2 * time.Second)
-			case <-keepaliveTicker.C:
-				a.logger.Debug("Sending listen key keepalive", "time", time.Now())
-				if err := bh.Client.NewKeepaliveUserStreamService().ListenKey(bh.ListenKey).Do(streamCtx); err != nil {
-					a.logger.Error("Keepalive failed", "error", err)
-					conn.Close()
-					break
-				}
-				continue
-			}
-			break
-		}
+	if a.wsManager == nil {
+		a.wsManager = NewWebSocketManager(a.logger)
 	}
 
-	// func (a *application) createRawWsHandler(bh *exchange.BinanceHandler) func(*custom.Event){
-	// 	return func(event *custom.Event){
-	// 		a.logger.Debug("Received raw event", "event", event)
-	// 	}
-	// }
-
-	// for {
-	// 	// Check if parent context is done
-	// 	select {
-	// 	case <-ctx.Done():
-	// 		return ctx.Err()
-	// 	default:
-	// 	}
-
-	// 	// Get/refresh listen key
-	// 	if err := a.wsBiReissueListenKey(bh); err != nil {
-	// 		a.logger.Error("Failed to get listen key", "error", err)
-	// 		time.Sleep(5 * time.Second)
-	// 		continue
-	// 	}
-
-	// 	// Connect to WebSocket
-	// 	a.logger.Info("Connecting to Binance WebSocket", "listenKey", bh.ListenKey)
-	// 	wsURL := fmt.Sprintf("wss://fstream.binance.com/ws/%s", bh.ListenKey)
-
-	// 	// Use gorilla/websocket
-	// 	dialer := websocket.Dialer{
-	// 		HandshakeTimeout: 10 * time.Second,
-	// 	}
-	// 	conn, _, err := dialer.Dial(wsURL, nil)
-	// 	if err != nil {
-	// 		a.logger.Error("WebSocket connection failed", "error", err)
-	// 		time.Sleep(5 * time.Second)
-	// 		continue
-	// 	}
-
-	// 	// Set up proper ping/pong handling
-	// 	conn.SetPingHandler(func(data string) error {
-	// 		a.logger.Debug("Received ping, sending pong")
-	// 		return conn.WriteControl(websocket.PongMessage, []byte(data), time.Now().Add(5*time.Second))
-	// 	})
-
-	// 	// Start listen key keepalive
-	// 	keepaliveTicker := time.NewTicker(30 * time.Minute)
-	// 	defer keepaliveTicker.Stop()
-
-	// 	// Create channel for this connection's lifecycle
-	// 	connDone := make(chan struct{})
-
-	// 	// Start reading messages
-	// 	go func() {
-	// 		defer close(connDone)
-	// 		defer conn.Close()
-
-	// 		for {
-	// 			_, message, err := conn.ReadMessage()
-	// 			if err != nil {
-	// 				a.logger.Error("WebSocket read error", "error", err)
-	// 				return
-	// 			}
-
-	// 			// Parse the message
-	// 			var event futures.WsUserDataEvent
-	// 			if err := json.Unmarshal(message, &event); err != nil {
-	// 				a.logger.Error("JSON unmarshal error", "error", err)
-	// 				continue
-	// 			}
-
-	// 			// Process event in a non-blocking way
-	// 			go a.createWSHandler(bh)(&event)
-	// 		}
-	// 	}()
-
-	// 	// Wait for either context cancellation, connection close, or keepalive
-	// 	select {
-	// 	case <-ctx.Done():
-	// 		conn.Close()
-	// 		return ctx.Err()
-
-	// 	case <-connDone:
-	// 		a.logger.Warn("WebSocket connection closed, reconnecting...")
-	// 		time.Sleep(2 * time.Second)
-
-	// 	case <-keepaliveTicker.C:
-	// 		a.logger.Debug("Sending listen key keepalive")
-	// 		if err := bh.Client.NewKeepaliveUserStreamService().
-	// 			ListenKey(bh.ListenKey).
-	// 			Do(streamCtx); err != nil {
-	// 			a.logger.Error("Keepalive failed", "error", err)
-	// 			conn.Close()
-	// 			time.Sleep(2 * time.Second)
-	// 		}
-	// 	}
-	// }
-}
-
-func (a *application) WSBiConnect(ctx context.Context, eh exchange.ExchangeStrategy) error {
-	fmt.Println("Current time:", time.Now())
-	bh, ok := eh.(*exchange.BinanceHandler)
-	if !ok {
-		return fmt.Errorf("incorrect handler passed for ws connect")
+	//Setup user data strategy
+	userDataStrategy := &UserDataStrategy{
+		listenKey:        bh.ListenKey,
+		refreshListenKey: func() (string, error) { return a.wsBiReissueListenKey(bh) },
+		handler:          a.createWSHandler(bh),
+		logger:           a.logger,
 	}
 
-	// Create a context that can be cancelled for each connection attempt
-	for {
-		// Check if main context is done
-		select {
-		case <-ctx.Done():
-			fmt.Println("MAIN CONTEXT DONE")
-			return ctx.Err()
-		default:
-			// Continue with connection attempt
-		}
-
-		// Get or refresh listen key
-		if err := a.wsBiReissueListenKey(bh); err != nil {
-			a.logger.Error("[WSBiConnect] failed to get listen key", "error", err)
-			time.Sleep(5 * time.Second) // Wait before retry
-			continue
-		}
-
-		a.logger.Info("[WSBiConnect] starting websocket connection", "listenKey", bh.ListenKey)
-
-		// Define event handler
-		wsHandler := func(event *futures.WsUserDataEvent) {
-			a.logger.Debug("[WSBiConnect] received websocket event", "event", event.Event)
-			a.createWSHandler(bh)(event)
-		}
-
-		// Define error handler
-		errHandler := func(err error) {
-			fmt.Println("Failure time:", time.Now())
-			a.logger.Error("[WSBiConnect] websocket error", "error", err)
-			// Error will trigger reconnection via doneCh
-		}
-
-		// Start keepalive ticker
-		keepaliveTicker := time.NewTicker(30 * time.Minute)
-		defer keepaliveTicker.Stop()
-
-		// Establish WebSocket connection
-		doneCh, stopCh, err := futures.WsUserDataServe(bh.ListenKey, wsHandler, errHandler)
-		if err != nil {
-			a.logger.Error("[WSBiConnect] failed to start websocket", "error", err)
-			time.Sleep(5 * time.Second) // Wait before retry
-			continue
-		}
-
-		activeTicker := time.NewTicker(1 * time.Minute)
-		defer activeTicker.Stop()
-
-		go func() {
-			pingTicker := time.NewTicker(30 * time.Second)
-			defer pingTicker.Stop()
-
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-pingTicker.C:
-					// Send a simple application-level request every 30 seconds
-					// This is different from the listen key keepalive
-					a.logger.Debug("[WSBiConnect] sending application ping")
-					err := bh.Client.NewPingService().Do(ctx)
-					if err != nil {
-						a.logger.Error("[WSBiConnect] application ping failed", "error", err)
-					}
-				}
-			}
-		}()
-
-		go func() {
-			activityTicker := time.NewTicker(10 * time.Second)
-			defer activityTicker.Stop()
-
-			lastActivityTime := time.Now()
-
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-activityTicker.C:
-					elapsed := time.Since(lastActivityTime)
-					a.logger.Debug("[WSBiConnect] connection status",
-						"seconds_since_activity", elapsed.Seconds())
-					if elapsed > 55*time.Second {
-						a.logger.Warn("[WSBiConnect] potential inactivity timeout approaching",
-							"seconds_inactive", elapsed.Seconds())
-					}
-					lastActivityTime = time.Now() // Reset for monitoring purposes
-				}
-			}
-		}()
-		// Start a goroutine for keepalive
-		keepaliveDone := make(chan struct{})
-		go func() {
-			defer close(keepaliveDone)
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-keepaliveTicker.C:
-					a.logger.Debug("[WSBiConnect] sending keepalive")
-					if err := bh.Client.NewKeepaliveUserStreamService().
-						ListenKey(bh.ListenKey).
-						Do(ctx); err != nil {
-						a.logger.Error("[WSBiConnect] keepalive failed", "error", err)
-						// Close the connection to trigger reconnect
-						if stopCh != nil {
-							close(stopCh)
-						}
-						return
-					}
-				}
-			}
-		}()
-
-		// Wait for connection to close or context to be cancelled
-		select {
-		case <-ctx.Done():
-			if stopCh != nil {
-				close(stopCh)
-			}
-			<-keepaliveDone // Wait for keepalive goroutine to exit
-			return ctx.Err()
-		case <-doneCh:
-			// Connection closed, wait for keepalive to finish
-			if stopCh != nil {
-				close(stopCh)
-			}
-			<-keepaliveDone
-			a.logger.Warn("[WSBiConnect] connection closed, reconnecting...")
-			time.Sleep(2 * time.Second) // Small delay before reconnect
-		}
-	}
+	return a.wsManager.Connect(ctx, "user-data", userDataStrategy)
 }
 
 func (a *application) createWSHandler(bh *exchange.BinanceHandler) func(*futures.WsUserDataEvent) {
 	return func(event *futures.WsUserDataEvent) {
 		jsonBytes, err := json.MarshalIndent(event, "", "  ")
 		if err != nil {
-			a.logger.Error("JSON marshal error:", "error", err)
+			a.logger.Error("JSON marshal error:", "error", err, "time", time.Now().Format("2006-01-02 15:04:05.000"))
 			return
 		}
 
 		var parsedEvent futures.WsUserDataEvent
 		if err := json.Unmarshal(jsonBytes, &parsedEvent); err != nil {
-			a.logger.Error("JSON unmarshal error:", "error", err)
+			a.logger.Error("JSON unmarshal error:", "error", err, "time", time.Now().Format("2006-01-02 15:04:05.000"))
 			return
 		}
 		a.logOrderUpdate(parsedEvent)
 		if parsedEvent.Event == types.LISTEN_KEY_EXPIRED_EVENT {
-			a.logger.Info("Listen key expired, creating a new one")
+			a.logger.Info("Listen key expired, creating a new one", "time", time.Now().Format("2006-01-02 15:04:05.000"))
 			a.wsBiReissueListenKey(bh)
+		}
+		if a.CurrBiMainOrders.TPOrder != nil && parsedEvent.Event == types.ORDER_TRADE_UPDATE_EVENT && parsedEvent.OrderTradeUpdate.Status != futures.OrderStatusTypeFilled && parsedEvent.OrderTradeUpdate.ClientOrderID == a.CurrBiMainOrders.TPOrder.ClientOrderID {
+			a.shouldProcessReentry = false
 		}
 		if a.CurrBiMainOrders.MainOrder != nil && a.CurrBiMainOrders.TPOrder != nil && a.CurrBiMainOrders.SLOrder != nil {
 			fmt.Println("tp order details: ", a.CurrBiMainOrders.TPOrder.ClientOrderID)
 			if parsedEvent.Event == types.ORDER_TRADE_UPDATE_EVENT && parsedEvent.OrderTradeUpdate.Status == futures.OrderStatusTypeFilled && parsedEvent.OrderTradeUpdate.ClientOrderID == a.CurrBiMainOrders.TPOrder.ClientOrderID {
 				fmt.Println("====reentry starting now====")
+				a.shouldProcessReentry = true
 				a.startReentry(bh)
 			} else if parsedEvent.Event == types.ORDER_TRADE_UPDATE_EVENT && parsedEvent.OrderTradeUpdate.Status == futures.OrderStatusTypeFilled && parsedEvent.OrderID == a.CurrBiMainOrders.SLOrder.OrderID {
 				a.CurrBiMainOrders = types.BiSubmittedOrders{}
@@ -366,48 +73,79 @@ func (a *application) createWSHandler(bh *exchange.BinanceHandler) func(*futures
 
 func (a *application) createPriceWsHandler(bh *exchange.BinanceHandler) func(*futures.WsMarkPriceEvent) {
 	return func(event *futures.WsMarkPriceEvent) {
-		newPriceStr := event.MarkPrice
-		newPrice, err := strconv.ParseFloat(newPriceStr, 64)
-		if err != nil {
-			fmt.Println("PRICE COVNERSION ERR: ", err)
-			return
-		}
-		fmt.Println("Price update ---->>", event.MarkPrice)
-
-		if (newPrice <= 0.9995*a.BiTPStopPrice && newPrice >= a.BiSLStopPrice) || (newPrice >= 1.0005*a.BiTPStopPrice && newPrice <= a.BiSLStopPrice) {
-			totBalance, err := bh.GetAccountBalance()
+		if a.shouldProcessReentry {
+			newPriceStr := event.MarkPrice
+			newPrice, err := strconv.ParseFloat(newPriceStr, 64)
 			if err != nil {
-				a.logger.Error("Failed to get balance", "error", err)
+				fmt.Println("PRICE COVNERSION ERR: ", err)
 				return
 			}
-			priceToFloat, _ := strconv.ParseFloat(a.CurrBiMainOrders.MainOrder.Price, 64)
-			qty := bh.GetFinalQty(totBalance, a.CurrBiMainOrders.Signal.Leverage, priceToFloat)
-			a.logger.Info("[BinanceHandler] final quantity calculated", "qty", qty)
+			a.logger.Debug("--- Price update ---",
+				"currentPrice", newPrice,
+				"TPThreshold", 0.9995*a.BiTPStopPrice,
+				"SLThreshold", a.BiSLStopPrice,
+				"TPThresholdUpper", 1.0005*a.BiTPStopPrice,
+				"conditionMet",
+				(newPrice <= 0.9995*a.BiTPStopPrice && newPrice >= a.BiSLStopPrice) ||
+					(newPrice >= 1.0005*a.BiTPStopPrice && newPrice <= a.BiSLStopPrice))
 
-			cancelErr := bh.CancelAllOpenOrders(a.CurrBiMainOrders.Signal.Symbol)
-			if cancelErr != nil {
-				a.logger.Error("[BinanceHandler] fialed to cancel open orders", "error", cancelErr)
+			if (newPrice <= 0.9995*a.BiTPStopPrice && newPrice >= a.BiSLStopPrice) || (newPrice >= 1.0005*a.BiTPStopPrice && newPrice <= a.BiSLStopPrice) {
+				totBalance, err := bh.GetAccountBalance()
+				if err != nil {
+					a.logger.Error("Failed to get balance", "error", err, "time", time.Now().Format("2006-01-02 15:04:05.000"))
+					return
+				}
+				priceToFloat, _ := strconv.ParseFloat(a.CurrBiMainOrders.MainOrder.Price, 64)
+				qty := bh.GetFinalQty(totBalance, a.CurrBiMainOrders.Signal.Leverage, priceToFloat)
+				a.logger.Info("[BinanceHandler] final quantity calculated", "qty", qty, "time", time.Now().Format("2006-01-02 15:04:05.000"))
+
+				cancelErr := bh.CancelAllOpenOrders(a.CurrBiMainOrders.Signal.Symbol)
+				if cancelErr != nil {
+					a.logger.Error("[BinanceHandler] fialed to cancel open orders", "error", cancelErr, "time", time.Now().Format("2006-01-02 15:04:05.000"))
+				}
+				bh.ExecuteBatchOrder(&a.CurrBiMainOrders.Signal, priceToFloat, qty, a.CurrBiMainOrders.StepSize, a.CurrBiMainOrders.TickSize)
+				a.shouldProcessReentry = false
+				if a.priceStreamCancel != nil {
+					a.priceStreamCancel()
+				}
 			}
-			bh.ExecuteBatchOrder(&a.CurrBiMainOrders.Signal, priceToFloat, qty, a.CurrBiMainOrders.StepSize, a.CurrBiMainOrders.TickSize)
 		}
 	}
 
 }
 
 func (a *application) startReentry(bh *exchange.BinanceHandler) {
-	priceStreamHandler := a.createPriceWsHandler(bh)
-	errHandler := a.reEntryCreateErrorHandler()
-	doneCh, stopCh, err := futures.WsMarkPriceServe(a.CurrBiMainOrders.MainOrder.Symbol, priceStreamHandler, errHandler)
-	_ = doneCh
-	_ = stopCh
-	if err != nil {
-		fmt.Println("ERRROR: ", err)
+	symbol := a.CurrBiMainOrders.MainOrder.Symbol
+
+	// Setup mark price strategy
+	markPriceStrategy := &MarkPriceStrategy{
+		symbol:  symbol,
+		handler: a.createPriceWsHandler(bh),
+		logger:  a.logger,
 	}
+
+	// Create context with cancel for this connection
+	priceCtx, cancel := context.WithCancel(bh.Ctx)
+	a.priceStreamCancel = cancel
+
+	// Connect with mark price strategy
+	if err := a.wsManager.Connect(priceCtx, "mark-price-"+symbol, markPriceStrategy); err != nil {
+		a.logger.Error("Failed to connect to mark price WebSocket", "symbol", symbol, "error", err, "time", time.Now().Format("2006-01-02 15:04:05.000"))
+	}
+
+	// priceStreamHandler := a.createPriceWsHandler(bh)
+	// errHandler := a.reEntryCreateErrorHandler()
+	// doneCh, stopCh, err := futures.WsMarkPriceServe(a.CurrBiMainOrders.MainOrder.Symbol, priceStreamHandler, errHandler)
+	// _ = doneCh
+	// _ = stopCh
+	// if err != nil {
+	// 	fmt.Println("ERRROR: ", err)
+	// }
 }
 
 func (a *application) reEntryCreateErrorHandler() func(error) {
 	return func(err error) {
-		a.logger.Error("Reentry webSocket error:", "error", err)
+		a.logger.Error("Reentry webSocket error:", "error", err, "time", time.Now().Format("2006-01-02 15:04:05.000"))
 	}
 }
 func (a *application) logOrderUpdate(event futures.WsUserDataEvent) {
@@ -435,16 +173,217 @@ func (a *application) logOrderUpdate(event futures.WsUserDataEvent) {
 			"orderSide", printer.orderSide,
 			"orderType", printer.orderType,
 			"orderStatus", printer.orderStatus,
+			"time", time.Now().Format("2006-01-02 15:04:05.000"),
 		)
 	}
 
 }
 
-func (a *application) wsBiReissueListenKey(h *exchange.BinanceHandler) error {
+func (a *application) wsBiReissueListenKey(h *exchange.BinanceHandler) (string, error) {
 	listenKey, err := h.Client.NewStartUserStreamService().Do(h.Ctx)
 	if err != nil {
+		return "", err
+	}
+	return listenKey, nil
+}
+
+type WebSocketStrategy interface {
+	GetEndpoint() string
+	HandleMessage(message []byte) error
+	HandleError(err error)
+}
+
+type WebSocketManager struct {
+	connections map[string]*websocket.Conn
+	strategies  map[string]WebSocketStrategy
+	logger      *slog.Logger
+	mu          sync.RWMutex
+}
+
+func NewWebSocketManager(logger *slog.Logger) *WebSocketManager {
+	return &WebSocketManager{
+		connections: make(map[string]*websocket.Conn),
+		strategies:  make(map[string]WebSocketStrategy),
+		logger:      logger,
+	}
+}
+
+// Connect establishes a WebSocket connection using the given strategy
+func (m *WebSocketManager) Connect(ctx context.Context, strategyName string, strategy WebSocketStrategy) error {
+	m.mu.Lock()
+	m.strategies[strategyName] = strategy
+	m.mu.Unlock()
+
+	return m.connectWithRetry(ctx, strategyName)
+}
+
+func (m *WebSocketManager) connectWithRetry(ctx context.Context, name string) error {
+	m.mu.RLock()
+	strategy := m.strategies[name]
+	m.mu.RUnlock()
+
+	// Establish connection
+	dialer := websocket.Dialer{HandshakeTimeout: 10 * time.Second}
+	conn, _, err := dialer.Dial(strategy.GetEndpoint(), nil)
+	if err != nil {
+		m.logger.Error("WebSocket connection failed", "name", name, "error", err, "time", time.Now().Format("2006-01-02 15:04:05.000"))
+		// Retry connection after delay
+		go func() {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(5 * time.Second):
+				if err := m.connectWithRetry(ctx, name); err != nil {
+					m.logger.Error("WebSocket reconnection failed", "name", name, "error", err, "time", time.Now().Format("2006-01-02 15:04:05.000"))
+				}
+			}
+		}()
 		return err
 	}
-	h.ListenKey = listenKey
+	// Set up ping handler
+	conn.SetPingHandler(func(data string) error {
+		m.logger.Debug("Received ping, sending pong", "name", name, "time", time.Now().Format("2006-01-02 15:04:05.000"))
+		return conn.WriteControl(websocket.PongMessage, []byte(data), time.Now().Add(5*time.Second))
+	})
+
+	m.mu.Lock()
+	m.connections[name] = conn
+	m.mu.Unlock()
+
+	// Start reading messages
+	go m.readMessages(ctx, name, conn)
+
 	return nil
+}
+
+func (m *WebSocketManager) readMessages(ctx context.Context, name string, conn *websocket.Conn) {
+	defer func() {
+		conn.Close()
+		m.mu.Lock()
+		delete(m.connections, name)
+		m.mu.Unlock()
+	}()
+
+	m.mu.RLock()
+	strategy := m.strategies[name]
+	m.mu.RUnlock()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+			_, message, err := conn.ReadMessage()
+			if err != nil {
+				strategy.HandleError(err)
+				// Try to reconnect
+				go func() {
+					select {
+					case <-ctx.Done():
+						return
+					case <-time.After(2 * time.Second):
+						m.connectWithRetry(ctx, name)
+					}
+				}()
+				return
+			}
+
+			if err := strategy.HandleMessage(message); err != nil {
+				m.logger.Error("Message handling error", "name", name, "error", err, "time", time.Now().Format("2006-01-02 15:04:05.000"))
+				if err.Error() == "listen key refreshed, need to reconnect" {
+					// Reconnect with new listen key
+					go func() {
+						conn.Close()
+						m.connectWithRetry(ctx, name)
+					}()
+					return
+				}
+			}
+		}
+	}
+}
+
+// Disconnect closes a WebSocket connection
+func (m *WebSocketManager) Disconnect(name string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	conn, exists := m.connections[name]
+	if !exists {
+		return nil
+	}
+
+	err := conn.Close()
+	delete(m.connections, name)
+	return err
+}
+
+// DisconnectAll closes all WebSocket connections
+func (m *WebSocketManager) DisconnectAll() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	for name, conn := range m.connections {
+		conn.Close()
+		delete(m.connections, name)
+	}
+}
+
+type UserDataStrategy struct {
+	listenKey        string
+	refreshListenKey func() (string, error)
+	handler          func(*futures.WsUserDataEvent)
+	logger           *slog.Logger
+}
+
+func (s *UserDataStrategy) GetEndpoint() string {
+	return fmt.Sprintf("wss://fstream.binance.com/ws/%s", s.listenKey)
+}
+
+func (s *UserDataStrategy) HandleMessage(message []byte) error {
+	var event futures.WsUserDataEvent
+	if err := json.Unmarshal(message, &event); err != nil {
+		return err
+	}
+
+	if event.Event == types.LISTEN_KEY_EXPIRED_EVENT {
+		s.logger.Info("Listen key expired, refreshing...", "time", time.Now().Format("2006-01-02 15:04:05.000"))
+		newListenKey, err := s.refreshListenKey()
+		if err != nil {
+			s.logger.Error("Failed to refresh listen key", "error", err, "time", time.Now().Format("2006-01-02 15:04:05.000"))
+			return err
+		}
+		s.listenKey = newListenKey
+		s.logger.Info("Listen key refreshed", "newListenKey", newListenKey, "time", time.Now().Format("2006-01-02 15:04:05.000"))
+		return fmt.Errorf("listen key refreshed, need to reconnect")
+	}
+	s.handler(&event)
+	return nil
+}
+
+func (s *UserDataStrategy) HandleError(err error) {
+	s.logger.Error("User data webSocket error", "error", err, "time", time.Now().Format("2006-01-02 15:04:05.000"))
+}
+
+type MarkPriceStrategy struct {
+	symbol  string
+	handler func(*futures.WsMarkPriceEvent)
+	logger  *slog.Logger
+}
+
+func (s *MarkPriceStrategy) GetEndpoint() string {
+	return fmt.Sprintf("wss://fstream.binance.com/ws/%s@markPrice", strings.ToLower(s.symbol))
+}
+
+func (s *MarkPriceStrategy) HandleMessage(message []byte) error {
+	var event futures.WsMarkPriceEvent
+	if err := json.Unmarshal(message, &event); err != nil {
+		return err
+	}
+	s.handler(&event)
+	return nil
+}
+
+func (s *MarkPriceStrategy) HandleError(err error) {
+	s.logger.Error("Mark price webSocket error", "error", err, "time", time.Now().Format("2006-01-02 15:04:05.000"))
 }

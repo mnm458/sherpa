@@ -111,7 +111,7 @@ func (bs BinanceSignal) GetLeverage() int64 {
 	return bs.Leverage
 }
 func (b BinanceSignal) String() string {
-	return fmt.Sprintf("Symbol: %s, Type: %s, Action: %s, Leverage: %d, TP: %.2f, SL: %.2f",
+	return fmt.Sprintf("Symbol: %s, Type: %s, Action: %s, Leverage: %d, TP: %.2f, SL: %.4f",
 		b.Symbol, b.Type, b.Action, b.Leverage, b.TP, b.SL)
 }
 

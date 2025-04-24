@@ -14,7 +14,7 @@ type Signal interface {
 }
 
 const (
-	EQUITY_PERCENTAGE = 0.95
+	EQUITY_PERCENTAGE = 0.97
 )
 
 type ExchangeStrategy interface {

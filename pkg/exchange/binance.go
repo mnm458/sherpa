@@ -28,7 +28,7 @@ func NewBinanceHandler(ctx context.Context, apiKey string, secret string, submit
 	client := futures.NewClient(apiKey, secret)
 	listenKey, err := client.NewStartUserStreamService().Do(ctx)
 	if err != nil {
-		fmt.Println("ERROR: ", err)
+		fmt.Println("err:%v", err)
 		panic("failed to create listen key")
 	}
 
@@ -315,6 +315,16 @@ func (bh *BinanceHandler) CreateOrderLimitMarket(args types.OpenOrder) *futures.
 		order = order.ClosePosition(v)
 	}
 	return order
+}
+
+func (bh *BinanceHandler) CreateMarketOrder() error {
+	res, err := bh.Client.NewCreateOrderService().Symbol("BTCUSDT").Side(futures.SideType("SELL")).Type(futures.OrderType("Market")).Quantity("0.005").Do(bh.Ctx)
+
+	if err != nil {
+		return err
+	}
+	_ = res
+	return nil
 }
 
 func (bh *BinanceHandler) CancelAllOpenOrders(symbol string) error {

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strconv"
 	"sync"
 
 	"github.com/joho/godotenv"
@@ -29,24 +30,27 @@ const (
 )
 
 type application struct {
-	ctx              context.Context
-	logger           *slog.Logger
-	ExchangeHandler  exchange.ExchangeStrategy
-	wsURL            string
-	apiKey           string
-	secret           string
-	CurrByMainOrder  types.ByMainOrder
-	CurrBiMainOrders types.BiSubmittedOrders
-	BiTPStopPrice    float64
-	BiSLStopPrice    float64
-	TpOrderId        string
-	SlOrderId        string
-	ByOrdersChan     chan types.ByMainOrder
-	BiOrdersChan     chan types.BiSubmittedOrders
-	ActiveExchange   string
-	wsStopChannels   map[string]chan struct{}
-	wsMutex          sync.Mutex
-	ExchangeID       int32
+	ctx                  context.Context
+	logger               *slog.Logger
+	ExchangeHandler      exchange.ExchangeStrategy
+	wsURL                string
+	apiKey               string
+	secret               string
+	CurrByMainOrder      types.ByMainOrder
+	CurrBiMainOrders     types.BiSubmittedOrders
+	BiTPStopPrice        float64
+	BiSLStopPrice        float64
+	TpOrderId            string
+	SlOrderId            string
+	ByOrdersChan         chan types.ByMainOrder
+	BiOrdersChan         chan types.BiSubmittedOrders
+	ActiveExchange       string
+	wsStopChannels       map[string]chan struct{}
+	wsMutex              sync.Mutex
+	ExchangeID           int32
+	wsManager            *WebSocketManager
+	priceStreamCancel    context.CancelFunc
+	shouldProcessReentry bool
 }
 
 func NewApplication(ctx context.Context, cfg Config) *application {
@@ -130,6 +134,10 @@ func (a *application) ListenForBiOrderUpdates(ctx context.Context) {
 	for order := range a.BiOrdersChan {
 		fmt.Println("got a binance main order ======>", order)
 		a.CurrBiMainOrders = order
+		tpPrice, _ := strconv.ParseFloat(order.TPOrder.Price, 64)
+		slPrice, _ := strconv.ParseFloat(order.SLOrder.Price, 64)
+		a.BiTPStopPrice = tpPrice
+		a.BiSLStopPrice = slPrice
 	}
 	a.logger.Info("binance order updates listener stopped")
 }

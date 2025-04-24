@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 
 	"github.com/mnm458/sherpa/pkg/exchange"
@@ -64,17 +66,30 @@ func (app *application) HandleSignal(w http.ResponseWriter, r *http.Request) {
 		}
 		w.WriteHeader(http.StatusOK)
 	case exchange.BINANCE_EXCHANGE_ID:
+
 		var signal types.BinanceSignal
 		err := json.NewDecoder(r.Body).Decode(&signal)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		fmt.Printf("Received signal: Symbol: %s, Type: %s, Action: %s, Leverage: %d, TP: %.5f, SL: %.5f\n",
+			signal.Symbol, signal.Type, signal.Action, signal.Leverage, signal.TP, signal.SL)
+		bodyBytes, _ := io.ReadAll(r.Body)
+		r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes)) // Reset for later decoding
+		fmt.Printf("Raw request body: %s\n", string(bodyBytes))
 		err = app.ExchangeHandler.Process(signal)
 
 	}
 }
 
-func (app *application) TriggerReentryBybit(w http.ResponseWriter, r *http.Request) {
+func (app *application) AdhocMarketOrder(w http.ResponseWriter, r *http.Request) {
 
+	bh, _ := app.ExchangeHandler.(*exchange.BinanceHandler)
+
+	err := bh.CreateMarketOrder()
+	if err != nil {
+		fmt.Println(err)
+	}
+	w.WriteHeader(http.StatusOK)
 }
