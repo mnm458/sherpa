@@ -126,7 +126,7 @@ go build -o sherpa ./cmd/web
 
    [Service]
    WorkingDirectory=/home/ubuntu/instances/gs%i
-   ExecStart=/home/ubuntu/instances/gs%i/sherpa -exchange binance -env prod -addr :400%i -reEntrySwitch false
+   ExecStart=/home/ubuntu/instances/gs%i/sherpa -exchange binance -env prod -addr :400%i -reEntrySwitch=false
    EnvironmentFile=/home/ubuntu/instances/gs%i/.env
    Restart=always
    User=ubuntu

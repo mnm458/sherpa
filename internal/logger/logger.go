@@ -1,15 +1,27 @@
 package logger
 
 import (
+	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"runtime"
 	"strings"
+	"time"
 )
+
+var sydneyLoc *time.Location
+
+func init() {
+	var err error
+	sydneyLoc, err = time.LoadLocation("Australia/Sydney")
+	if err != nil {
+		// Fallback to fixed AEST offset if timezone DB unavailable
+		sydneyLoc = time.FixedZone("AEST", 10*60*60)
+	}
+}
 
 type PrettyHandlerOptions struct {
 	SlogOpts *slog.HandlerOptions
@@ -17,23 +29,20 @@ type PrettyHandlerOptions struct {
 
 type PrettyHandler struct {
 	slog.Handler
-	l *slog.Logger
+	w io.Writer
 }
 
 func NewPrettyHandler(out io.Writer, opts *PrettyHandlerOptions) *PrettyHandler {
-	h := &PrettyHandler{}
-
 	if opts == nil {
 		opts = &PrettyHandlerOptions{}
 	}
-
-	h.Handler = slog.NewTextHandler(out, opts.SlogOpts)
-	h.l = slog.New(h.Handler)
-	return h
+	return &PrettyHandler{
+		Handler: slog.NewTextHandler(out, opts.SlogOpts),
+		w:       out,
+	}
 }
 
 func (h *PrettyHandler) Handle(ctx context.Context, r slog.Record) error {
-	// Extract file and line number from source
 	var file string
 	var line int
 	if r.PC != 0 {
@@ -46,27 +55,18 @@ func (h *PrettyHandler) Handle(ctx context.Context, r slog.Record) error {
 		line = frame.Line
 	}
 
-	// Create a map for the formatted log
-	logMap := map[string]interface{}{
-		"level": r.Level.String(),
-		"msg":   r.Message,
-		"file":  fmt.Sprintf("%s:%d", file, line),
-	}
+	timestamp := r.Time.In(sydneyLoc).Format("2006-01-02 15:04:05.000 MST")
 
-	// Add attributes
+	var buf bytes.Buffer
+	fmt.Fprintf(&buf, "%s  %-7s  [%s:%d]  %s", timestamp, r.Level.String(), file, line, r.Message)
+
 	r.Attrs(func(a slog.Attr) bool {
-		logMap[a.Key] = a.Value.Any()
+		fmt.Fprintf(&buf, "  %s=%v", a.Key, a.Value.Any())
 		return true
 	})
+	buf.WriteByte('\n')
 
-	// Marshal to JSON with indentation
-	jsonLog, err := json.MarshalIndent(logMap, "", "  ")
-	if err != nil {
-		return err
-	}
-
-	// Write the log line
-	_, err = os.Stdout.Write(append(jsonLog, '\n'))
+	_, err := h.w.Write(buf.Bytes())
 	return err
 }
 

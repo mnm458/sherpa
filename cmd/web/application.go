@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"os"
 	"strconv"
@@ -64,7 +63,7 @@ func NewApplication(ctx context.Context, cfg Config) *application {
 	if err != nil {
 		panic("cannot load env file")
 	}
-	fmt.Println("EXCHANGE", cfg.Exchange)
+	cfg.Logger.Info("initialising exchange handler", "exchange", cfg.Exchange)
 	switch cfg.Exchange {
 	case types.EXCHANGE_BINANCE:
 		switch cfg.Environment {
@@ -117,11 +116,8 @@ func NewApplication(ctx context.Context, cfg Config) *application {
 func (a *application) ListenForByOrderUpdates(ctx context.Context) {
 	a.logger.Info("starting bybit order updates listener")
 
-	// Add a debug message when the function starts
-	fmt.Printf("Debug: Starting listener. Channel address: %p\n", a.ByOrdersChan)
-
 	for order := range a.ByOrdersChan {
-		fmt.Println("got a bybit main order ======>", order)
+		a.logger.Info("bybit main order received", "symbol", order.Symbol, "side", order.Side, "qty", order.Quantity, "price", order.Price)
 		a.CurrByMainOrder = order
 	}
 
@@ -132,7 +128,7 @@ func (a *application) ListenForBiOrderUpdates(ctx context.Context) {
 	a.logger.Info("starting binance order updates listener")
 
 	for order := range a.BiOrdersChan {
-		fmt.Println("got a binance main order ======>", order)
+		a.logger.Info("binance main order received", "symbol", order.Signal.Symbol, "action", order.Signal.Action)
 		a.CurrBiMainOrders = order
 		tpPrice, _ := strconv.ParseFloat(order.TPOrder.Price, 64)
 		slPrice, _ := strconv.ParseFloat(order.SLOrder.Price, 64)

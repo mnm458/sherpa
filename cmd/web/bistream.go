@@ -40,30 +40,30 @@ func (a *application) createWSHandler(bh *exchange.BinanceHandler) func(*futures
 	return func(event *futures.WsUserDataEvent) {
 		jsonBytes, err := json.MarshalIndent(event, "", "  ")
 		if err != nil {
-			a.logger.Error("JSON marshal error:", "error", err, "time", time.Now().Format("2006-01-02 15:04:05.000"))
+			a.logger.Error("JSON marshal error", "error", err)
 			return
 		}
 
 		var parsedEvent futures.WsUserDataEvent
 		if err := json.Unmarshal(jsonBytes, &parsedEvent); err != nil {
-			a.logger.Error("JSON unmarshal error:", "error", err, "time", time.Now().Format("2006-01-02 15:04:05.000"))
+			a.logger.Error("JSON unmarshal error", "error", err)
 			return
 		}
 		a.logOrderUpdate(parsedEvent)
 		if parsedEvent.Event == types.LISTEN_KEY_EXPIRED_EVENT {
-			a.logger.Info("Listen key expired, creating a new one", "time", time.Now().Format("2006-01-02 15:04:05.000"))
+			a.logger.Info("listen key expired, creating a new one")
 			a.wsBiReissueListenKey(bh)
 		}
 		if a.CurrBiMainOrders.TPOrder != nil && parsedEvent.Event == types.ORDER_TRADE_UPDATE_EVENT && parsedEvent.OrderTradeUpdate.Status != futures.OrderStatusTypeFilled && parsedEvent.OrderTradeUpdate.ClientOrderID == a.CurrBiMainOrders.TPOrder.ClientOrderID {
 			a.shouldProcessReentry = false
 		}
 		if a.CurrBiMainOrders.MainOrder != nil && a.CurrBiMainOrders.TPOrder != nil && a.CurrBiMainOrders.SLOrder != nil {
-			fmt.Println("tp order details: ", a.CurrBiMainOrders.TPOrder.ClientOrderID)
 			if parsedEvent.Event == types.ORDER_TRADE_UPDATE_EVENT && parsedEvent.OrderTradeUpdate.Status == futures.OrderStatusTypeFilled && parsedEvent.OrderTradeUpdate.ClientOrderID == a.CurrBiMainOrders.TPOrder.ClientOrderID {
-				fmt.Println("====reentry starting now====")
+				a.logger.Info("TP filled — initiating re-entry", "clientOrderID", a.CurrBiMainOrders.TPOrder.ClientOrderID)
 				a.shouldProcessReentry = true
 				a.startReentry(bh)
 			} else if parsedEvent.Event == types.ORDER_TRADE_UPDATE_EVENT && parsedEvent.OrderTradeUpdate.Status == futures.OrderStatusTypeFilled && parsedEvent.OrderID == a.CurrBiMainOrders.SLOrder.OrderID {
+				a.logger.Info("SL triggered — clearing position state", "orderID", parsedEvent.OrderID)
 				a.CurrBiMainOrders = types.BiSubmittedOrders{}
 			}
 		}
@@ -77,7 +77,7 @@ func (a *application) createPriceWsHandler(bh *exchange.BinanceHandler) func(*fu
 			newPriceStr := event.MarkPrice
 			newPrice, err := strconv.ParseFloat(newPriceStr, 64)
 			if err != nil {
-				fmt.Println("PRICE COVNERSION ERR: ", err)
+				a.logger.Error("failed to parse mark price", "error", err)
 				return
 			}
 			a.logger.Debug("--- Price update ---",
@@ -92,16 +92,16 @@ func (a *application) createPriceWsHandler(bh *exchange.BinanceHandler) func(*fu
 			if (newPrice <= 0.9995*a.BiTPStopPrice && newPrice >= a.BiSLStopPrice) || (newPrice >= 1.0005*a.BiTPStopPrice && newPrice <= a.BiSLStopPrice) {
 				totBalance, err := bh.GetAccountBalance()
 				if err != nil {
-					a.logger.Error("Failed to get balance", "error", err, "time", time.Now().Format("2006-01-02 15:04:05.000"))
+					a.logger.Error("re-entry: failed to get balance", "error", err)
 					return
 				}
 				priceToFloat, _ := strconv.ParseFloat(a.CurrBiMainOrders.MainOrder.Price, 64)
 				qty := bh.GetFinalQty(totBalance, a.CurrBiMainOrders.Signal.Leverage, priceToFloat)
-				a.logger.Info("[BinanceHandler] final quantity calculated", "qty", qty, "time", time.Now().Format("2006-01-02 15:04:05.000"))
+				a.logger.Info("re-entry: quantity calculated", "qty", qty)
 
 				cancelErr := bh.CancelAllOpenOrders(a.CurrBiMainOrders.Signal.Symbol)
 				if cancelErr != nil {
-					a.logger.Error("[BinanceHandler] fialed to cancel open orders", "error", cancelErr, "time", time.Now().Format("2006-01-02 15:04:05.000"))
+					a.logger.Error("re-entry: failed to cancel open orders", "error", cancelErr)
 				}
 				bh.ExecuteBatchOrder(&a.CurrBiMainOrders.Signal, priceToFloat, qty, a.CurrBiMainOrders.StepSize, a.CurrBiMainOrders.TickSize)
 				a.shouldProcessReentry = false
@@ -130,7 +130,7 @@ func (a *application) startReentry(bh *exchange.BinanceHandler) {
 
 	// Connect with mark price strategy
 	if err := a.wsManager.Connect(priceCtx, "mark-price-"+symbol, markPriceStrategy); err != nil {
-		a.logger.Error("Failed to connect to mark price WebSocket", "symbol", symbol, "error", err, "time", time.Now().Format("2006-01-02 15:04:05.000"))
+		a.logger.Error("failed to connect to mark price WebSocket", "symbol", symbol, "error", err)
 	}
 
 	// priceStreamHandler := a.createPriceWsHandler(bh)
@@ -145,7 +145,7 @@ func (a *application) startReentry(bh *exchange.BinanceHandler) {
 
 func (a *application) reEntryCreateErrorHandler() func(error) {
 	return func(err error) {
-		a.logger.Error("Reentry webSocket error:", "error", err, "time", time.Now().Format("2006-01-02 15:04:05.000"))
+		a.logger.Error("re-entry WebSocket error", "error", err)
 	}
 }
 func (a *application) logOrderUpdate(event futures.WsUserDataEvent) {
@@ -166,14 +166,13 @@ func (a *application) logOrderUpdate(event futures.WsUserDataEvent) {
 		printer.orderStatus = string(event.OrderTradeUpdate.Status)
 		printer.orderId = event.OrderID
 		// Option 1: Log individual fields
-		a.logger.Info("Received order update:",
+		a.logger.Info("Binance order update",
 			"eventName", printer.eventName,
 			"orderID", printer.orderId,
 			"clientOrderID", printer.clientOrderID,
 			"orderSide", printer.orderSide,
 			"orderType", printer.orderType,
 			"orderStatus", printer.orderStatus,
-			"time", time.Now().Format("2006-01-02 15:04:05.000"),
 		)
 	}
 
@@ -226,7 +225,7 @@ func (m *WebSocketManager) connectWithRetry(ctx context.Context, name string) er
 	dialer := websocket.Dialer{HandshakeTimeout: 10 * time.Second}
 	conn, _, err := dialer.Dial(strategy.GetEndpoint(), nil)
 	if err != nil {
-		m.logger.Error("WebSocket connection failed", "name", name, "error", err, "time", time.Now().Format("2006-01-02 15:04:05.000"))
+		m.logger.Error("WebSocket connection failed", "name", name, "error", err)
 		// Retry connection after delay
 		go func() {
 			select {
@@ -234,7 +233,7 @@ func (m *WebSocketManager) connectWithRetry(ctx context.Context, name string) er
 				return
 			case <-time.After(5 * time.Second):
 				if err := m.connectWithRetry(ctx, name); err != nil {
-					m.logger.Error("WebSocket reconnection failed", "name", name, "error", err, "time", time.Now().Format("2006-01-02 15:04:05.000"))
+					m.logger.Error("WebSocket reconnection failed", "name", name, "error", err)
 				}
 			}
 		}()
@@ -242,7 +241,7 @@ func (m *WebSocketManager) connectWithRetry(ctx context.Context, name string) er
 	}
 	// Set up ping handler
 	conn.SetPingHandler(func(data string) error {
-		m.logger.Debug("Received ping, sending pong", "name", name, "time", time.Now().Format("2006-01-02 15:04:05.000"))
+		m.logger.Debug("received ping, sending pong", "name", name)
 		return conn.WriteControl(websocket.PongMessage, []byte(data), time.Now().Add(5*time.Second))
 	})
 
@@ -289,7 +288,7 @@ func (m *WebSocketManager) readMessages(ctx context.Context, name string, conn *
 			}
 
 			if err := strategy.HandleMessage(message); err != nil {
-				m.logger.Error("Message handling error", "name", name, "error", err, "time", time.Now().Format("2006-01-02 15:04:05.000"))
+				m.logger.Error("message handling error", "name", name, "error", err)
 				if err.Error() == "listen key refreshed, need to reconnect" {
 					// Reconnect with new listen key
 					go func() {
@@ -347,14 +346,14 @@ func (s *UserDataStrategy) HandleMessage(message []byte) error {
 	}
 
 	if event.Event == types.LISTEN_KEY_EXPIRED_EVENT {
-		s.logger.Info("Listen key expired, refreshing...", "time", time.Now().Format("2006-01-02 15:04:05.000"))
+		s.logger.Info("listen key expired, refreshing")
 		newListenKey, err := s.refreshListenKey()
 		if err != nil {
-			s.logger.Error("Failed to refresh listen key", "error", err, "time", time.Now().Format("2006-01-02 15:04:05.000"))
+			s.logger.Error("failed to refresh listen key", "error", err)
 			return err
 		}
 		s.listenKey = newListenKey
-		s.logger.Info("Listen key refreshed", "newListenKey", newListenKey, "time", time.Now().Format("2006-01-02 15:04:05.000"))
+		s.logger.Info("listen key refreshed")
 		return fmt.Errorf("listen key refreshed, need to reconnect")
 	}
 	s.handler(&event)
@@ -362,7 +361,7 @@ func (s *UserDataStrategy) HandleMessage(message []byte) error {
 }
 
 func (s *UserDataStrategy) HandleError(err error) {
-	s.logger.Error("User data webSocket error", "error", err, "time", time.Now().Format("2006-01-02 15:04:05.000"))
+	s.logger.Error("user data WebSocket error", "error", err)
 }
 
 type MarkPriceStrategy struct {
@@ -385,5 +384,5 @@ func (s *MarkPriceStrategy) HandleMessage(message []byte) error {
 }
 
 func (s *MarkPriceStrategy) HandleError(err error) {
-	s.logger.Error("Mark price webSocket error", "error", err, "time", time.Now().Format("2006-01-02 15:04:05.000"))
+	s.logger.Error("mark price WebSocket error", "error", err)
 }

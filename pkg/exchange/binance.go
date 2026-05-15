@@ -24,11 +24,10 @@ type BinanceHandler struct {
 }
 
 func NewBinanceHandler(ctx context.Context, apiKey string, secret string, submittedOrdersChan chan types.BiSubmittedOrders, logger *slog.Logger) *BinanceHandler {
-	fmt.Println("API KEY + SECRET", apiKey, secret)
 	client := futures.NewClient(apiKey, secret)
 	listenKey, err := client.NewStartUserStreamService().Do(ctx)
 	if err != nil {
-		fmt.Println("err:%v", err)
+		logger.Error("[BinanceHandler] failed to create listen key", "error", err)
 		panic("failed to create listen key")
 	}
 
@@ -243,14 +242,14 @@ func (bh *BinanceHandler) ExecuteBatchOrder(s *types.BinanceSignal, price float6
 	submittedOrders.TickSize = tickSize
 	for _, order := range res.Orders {
 		if order.Type == futures.OrderType(strings.ToUpper(s.Type)) {
-			fmt.Println("MAIN ORDER PLACED", order.ClientOrderID, order.OrderID)
 			submittedOrders.MainOrder = order
+			bh.logger.Info("[BinanceHandler] main order placed", "clientOrderID", order.ClientOrderID, "orderID", order.OrderID)
 		} else if order.Type == futures.OrderTypeTakeProfit {
 			submittedOrders.TPOrder = order
-			fmt.Println("TP ORDER PLACED", order.ClientOrderID, order.OrderID)
+			bh.logger.Info("[BinanceHandler] TP order placed", "clientOrderID", order.ClientOrderID, "orderID", order.OrderID)
 		} else if order.Type == futures.OrderTypeStop {
 			submittedOrders.SLOrder = order
-			fmt.Println("SL ORDER PLACED", order.ClientOrderID, order.OrderID)
+			bh.logger.Info("[BinanceHandler] SL order placed", "clientOrderID", order.ClientOrderID, "orderID", order.OrderID)
 		}
 	}
 
@@ -339,7 +338,6 @@ func (bh *BinanceHandler) GetFinalQty(totalBalance float64, leverage int64, pric
 
 // handleLeverage returns an error. This method set the leverage for the account. It is not order specific
 func (bh *BinanceHandler) handleLeverage(symbol string, leverage int64) error {
-	fmt.Println("client credentials:", bh.Client.APIKey, bh.Client.SecretKey, bh.Client.BaseURL)
 	res, err := bh.Client.NewChangeLeverageService().Symbol(symbol).Leverage(int(leverage)).Do(bh.Ctx)
 	if err != nil {
 		bh.logger.Error("[BinanceHandler] failed to set leverage", "error", err)
@@ -360,10 +358,10 @@ func (bh *BinanceHandler) FetchCurrPrice(symbol string) (float64, error) {
 	for _, r := range res {
 		jsonData, err := json.Marshal(r)
 		if err != nil {
-			fmt.Printf("Error marshaling to JSON: %v\n", err)
+			bh.logger.Error("[BinanceHandler] failed to marshal price response", "error", err)
 			continue
 		}
-		fmt.Println(string(jsonData))
+		bh.logger.Debug("[BinanceHandler] mark price response", "data", string(jsonData))
 	}
 	markPrice, convErr := strconv.ParseFloat(res[0].MarkPrice, 64)
 	if convErr != nil {

@@ -193,7 +193,7 @@ func (bh *BybitHandler) PlaceOrder(category string, symbol string, side string, 
 		"takeProfit": tpStr,
 		"stopLoss":   slStr,
 	}
-	fmt.Println("PARAMS: ", params)
+	bh.logger.Debug("[BybitHandler] placing order", "params", params)
 	res, orderErr := bh.client.NewUtaBybitServiceWithParams(params).PlaceOrder(bh.ctx)
 	if orderErr != nil {
 		return "", orderErr
@@ -224,7 +224,7 @@ func (bh *BybitHandler) PlaceOrder(category string, symbol string, side string, 
 		StopLoss:   slPrice,
 		Precision:  precision,
 	}
-	fmt.Println("SENDING THIS TO THE CHANNEL: ", mainOrder)
+	bh.logger.Debug("[BybitHandler] sending order to channel", "symbol", mainOrder.Symbol, "side", mainOrder.Side)
 	bh.mainOrderChan <- mainOrder
 	return serverResp.Result.OrderId, nil
 
