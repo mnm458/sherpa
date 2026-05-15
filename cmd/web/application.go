@@ -6,11 +6,29 @@ import (
 	"os"
 	"strconv"
 	"sync"
+	"time"
 
 	"github.com/joho/godotenv"
 	"github.com/mnm458/sherpa/pkg/exchange"
 	"github.com/mnm458/sherpa/pkg/types"
 )
+
+var sydneyLoc *time.Location
+
+func init() {
+	var err error
+	sydneyLoc, err = time.LoadLocation("Australia/Sydney")
+	if err != nil {
+		sydneyLoc = time.FixedZone("AEST", 10*60*60)
+	}
+}
+
+func formatSydney(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.In(sydneyLoc).Format("2006-01-02 15:04:05.000 MST")
+}
 
 const (
 	BYBIT_API_KEY_TEST    = "BYBIT_API_KEY_TEST"
@@ -50,6 +68,20 @@ type application struct {
 	wsManager            *WebSocketManager
 	priceStreamCancel    context.CancelFunc
 	shouldProcessReentry bool
+
+	// Status tracking — all guarded by stateMu
+	stateMu         sync.RWMutex
+	wsConnected     bool
+	wsAuthenticated bool
+	wsLastMsgAt     time.Time
+	wsLastPingAt    time.Time
+	startedAt       time.Time
+	reEntrySwitchOn bool
+	lastSignalAt    time.Time
+	environment     string
+
+	// signalInFlight is accessed atomically (0 = idle, 1 = processing).
+	signalInFlight int32
 }
 
 func NewApplication(ctx context.Context, cfg Config) *application {
@@ -110,7 +142,11 @@ func NewApplication(ctx context.Context, cfg Config) *application {
 		ByOrdersChan:    bySubmittedOrderChan,
 		BiOrdersChan:    biSubmittedOrderChan,
 		ActiveExchange:  cfg.Exchange,
-		ExchangeHandler: eh}
+		ExchangeHandler: eh,
+		startedAt:       time.Now(),
+		environment:     string(cfg.Environment),
+		reEntrySwitchOn: cfg.ReEntrySwitch,
+	}
 }
 
 func (a *application) ListenForByOrderUpdates(ctx context.Context) {
@@ -118,7 +154,9 @@ func (a *application) ListenForByOrderUpdates(ctx context.Context) {
 
 	for order := range a.ByOrdersChan {
 		a.logger.Info("bybit main order received", "symbol", order.Symbol, "side", order.Side, "qty", order.Quantity, "price", order.Price)
+		a.stateMu.Lock()
 		a.CurrByMainOrder = order
+		a.stateMu.Unlock()
 	}
 
 	a.logger.Info("bybit order updates listener stopped")
