@@ -167,11 +167,13 @@ func (a *application) ListenForBiOrderUpdates(ctx context.Context) {
 
 	for order := range a.BiOrdersChan {
 		a.logger.Info("binance main order received", "symbol", order.Signal.Symbol, "action", order.Signal.Action)
-		a.CurrBiMainOrders = order
 		tpPrice, _ := strconv.ParseFloat(order.TPOrder.Price, 64)
 		slPrice, _ := strconv.ParseFloat(order.SLOrder.Price, 64)
+		a.stateMu.Lock()
+		a.CurrBiMainOrders = order
 		a.BiTPStopPrice = tpPrice
 		a.BiSLStopPrice = slPrice
+		a.stateMu.Unlock()
 	}
 	a.logger.Info("binance order updates listener stopped")
 }

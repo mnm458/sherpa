@@ -31,31 +31,6 @@ func NewBinanceHandler(ctx context.Context, apiKey string, secret string, submit
 		panic("failed to create listen key")
 	}
 
-	// wsHandler := func(event *futures.WsUserDataEvent) {
-	// 	jsonBytes, err := json.MarshalIndent(event, "", "  ")
-	// 	if err != nil {
-	// 		fmt.Println("error:", err)
-	// 		return
-	// 	}
-
-	// 	var parsedEvent futures.WsUserDataEvent
-	// 	if err := json.Unmarshal(jsonBytes, &parsedEvent); err != nil {
-	// 		fmt.Println("error:", err)
-	// 		return
-	// 	}
-	// 	fmt.Printf("Parsed event: %+v\n", parsedEvent)
-	// }
-
-	// errHandler := func(err error) {
-	// 	fmt.Println("WebSocket error:", err)
-	// }
-
-	// go func() {
-	// 	_, _, err := futures.WsUserDataServe(listenKey, wsHandler, errHandler)
-	// 	if err != nil {
-	// 		fmt.Println("WebSocket serve error:", err)
-	// 	}
-	// }()
 	return &BinanceHandler{
 		Ctx:                 ctx,
 		apiKey:              apiKey,
@@ -98,11 +73,11 @@ func (bh *BinanceHandler) Process(s Signal) error {
 
 	cancelErr := bh.CancelAllOpenOrders(binanceSignal.Symbol)
 	if cancelErr != nil {
-		bh.logger.Error("[BinanceHandler] fialed to cancel open orders", "error", cancelErr)
+		bh.logger.Error("[BinanceHandler] failed to cancel open orders", "error", cancelErr)
 	}
 	bh.logger.Info("[BinanceHandler] all open orders cancelled")
 
-	stepSize, tickSize, err := bh.getPricePrecisionAndTickSize()
+	stepSize, tickSize, err := bh.getPricePrecisionAndTickSize(binanceSignal.Symbol)
 	if err != nil {
 		bh.logger.Error("[BinanceHandler] failed to get precision", "error", err)
 	}
@@ -112,24 +87,19 @@ func (bh *BinanceHandler) Process(s Signal) error {
 	if mainErr != nil {
 		bh.logger.Error("[BinanceHandler] order execution failed", "error", mainErr)
 	}
-	// validatedQuantity, err := bh.ValidateQuantity(binanceSignal.Symbol, quantity)
-	// if err != nil {
-	// 	bh.logger.Error("Failed to validate quantity", "error", err)
-	// 	return err
-	// }
 	return nil
 }
 
-func (bh *BinanceHandler) getPricePrecisionAndTickSize() (float64, float64, error) {
+func (bh *BinanceHandler) getPricePrecisionAndTickSize(symbol string) (float64, float64, error) {
 	var tickSize float64
 	var stepSize float64
 	exInfo, err := bh.Client.NewExchangeInfoService().Do(bh.Ctx)
 	if err != nil {
 		return 0, 0, err
 	}
-	for _, symbol := range exInfo.Symbols {
-		if symbol.Symbol == BTCUSDT {
-			for _, filter := range symbol.Filters {
+	for _, s := range exInfo.Symbols {
+		if s.Symbol == symbol {
+			for _, filter := range s.Filters {
 				if filter["filterType"] == "PRICE_FILTER" {
 					tickSizef, err := strconv.ParseFloat(filter["tickSize"].(string), 64)
 					if err != nil {
@@ -166,11 +136,9 @@ func (bh *BinanceHandler) ExecuteBatchOrder(s *types.BinanceSignal, price float6
 	finalPrice := math.Round(price/tickSize) * tickSize
 	decimals := countDecimalPlaces(tickSize)
 	priceStr := strconv.FormatFloat(finalPrice, 'f', decimals, 64)
-	// fmt.Println("PRICE  MAIN:", priceStr)
 	finalQty := math.Round(qty/stepSize) * stepSize
 	qtyDecimals := countDecimalPlaces(stepSize)
 	qtyStr := strconv.FormatFloat(finalQty, 'f', qtyDecimals, 64)
-	// fmt.Println("Quantity: ", qtyStr)
 	var mOrder types.OpenOrder
 	if strings.ToUpper(s.Action) == "BUY" {
 		mOrder.Side = futures.SideTypeBuy
@@ -201,8 +169,6 @@ func (bh *BinanceHandler) ExecuteBatchOrder(s *types.BinanceSignal, price float6
 	slPriceFinal := math.Round(slPrice/tickSize) * tickSize
 	tpPriceStr := strconv.FormatFloat(tpPriceFinal, 'f', decimals, 64)
 	slPriceStr := strconv.FormatFloat(slPriceFinal, 'f', decimals, 64)
-	// fmt.Println("PRICE  TP:", tpPriceStr)
-	// fmt.Println("PRICE  SL:", slPriceStr)
 	tpOrder.Symbol = s.Symbol
 	tpOrder.Side = futures.SideType(tpslSide) // SideTypeBuy SideTypeSell
 	tpOrder.Type = futures.OrderType("TAKE_PROFIT")
@@ -316,9 +282,13 @@ func (bh *BinanceHandler) CreateOrderLimitMarket(args types.OpenOrder) *futures.
 	return order
 }
 
-func (bh *BinanceHandler) CreateMarketOrder() error {
-	res, err := bh.Client.NewCreateOrderService().Symbol("BTCUSDT").Side(futures.SideType("SELL")).Type(futures.OrderType("Market")).Quantity("0.005").Do(bh.Ctx)
-
+func (bh *BinanceHandler) CreateMarketOrder(symbol, side, quantity string) error {
+	res, err := bh.Client.NewCreateOrderService().
+		Symbol(symbol).
+		Side(futures.SideType(strings.ToUpper(side))).
+		Type(futures.OrderTypeMarket).
+		Quantity(quantity).
+		Do(bh.Ctx)
 	if err != nil {
 		return err
 	}

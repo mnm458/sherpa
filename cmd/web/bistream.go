@@ -133,49 +133,20 @@ func (a *application) startReentry(bh *exchange.BinanceHandler) {
 		a.logger.Error("failed to connect to mark price WebSocket", "symbol", symbol, "error", err)
 	}
 
-	// priceStreamHandler := a.createPriceWsHandler(bh)
-	// errHandler := a.reEntryCreateErrorHandler()
-	// doneCh, stopCh, err := futures.WsMarkPriceServe(a.CurrBiMainOrders.MainOrder.Symbol, priceStreamHandler, errHandler)
-	// _ = doneCh
-	// _ = stopCh
-	// if err != nil {
-	// 	fmt.Println("ERRROR: ", err)
-	// }
 }
 
-func (a *application) reEntryCreateErrorHandler() func(error) {
-	return func(err error) {
-		a.logger.Error("re-entry WebSocket error", "error", err)
-	}
-}
 func (a *application) logOrderUpdate(event futures.WsUserDataEvent) {
-	var printer struct {
-		eventName     string
-		orderId       int64
-		clientOrderID string
-		orderSide     string
-		orderType     string
-		orderStatus   string
+	if event.Event != futures.UserDataEventTypeOrderTradeUpdate {
+		return
 	}
-
-	if event.Event == futures.UserDataEventTypeOrderTradeUpdate {
-		printer.eventName = string(event.Event)
-		printer.clientOrderID = event.OrderTradeUpdate.ClientOrderID
-		printer.orderSide = string(event.Side)
-		printer.orderType = string(event.OrderTradeUpdate.Type)
-		printer.orderStatus = string(event.OrderTradeUpdate.Status)
-		printer.orderId = event.OrderID
-		// Option 1: Log individual fields
-		a.logger.Info("Binance order update",
-			"eventName", printer.eventName,
-			"orderID", printer.orderId,
-			"clientOrderID", printer.clientOrderID,
-			"orderSide", printer.orderSide,
-			"orderType", printer.orderType,
-			"orderStatus", printer.orderStatus,
-		)
-	}
-
+	a.logger.Info("Binance order update",
+		"eventName", string(event.Event),
+		"orderID", event.OrderID,
+		"clientOrderID", event.OrderTradeUpdate.ClientOrderID,
+		"orderSide", string(event.Side),
+		"orderType", string(event.OrderTradeUpdate.Type),
+		"orderStatus", string(event.OrderTradeUpdate.Status),
+	)
 }
 
 func (a *application) wsBiReissueListenKey(h *exchange.BinanceHandler) (string, error) {

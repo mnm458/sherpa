@@ -109,9 +109,24 @@ func (app *application) HandleSignal(w http.ResponseWriter, r *http.Request) {
 }
 
 func (app *application) AdhocMarketOrder(w http.ResponseWriter, r *http.Request) {
-	bh, _ := app.ExchangeHandler.(*exchange.BinanceHandler)
-	if err := bh.CreateMarketOrder(); err != nil {
+	bh, ok := app.ExchangeHandler.(*exchange.BinanceHandler)
+	if !ok {
+		http.Error(w, "adhoc market orders only supported for Binance", http.StatusBadRequest)
+		return
+	}
+	var req struct {
+		Symbol   string `json:"symbol"`
+		Side     string `json:"side"`
+		Quantity string `json:"quantity"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := bh.CreateMarketOrder(req.Symbol, req.Side, req.Quantity); err != nil {
 		app.logger.Error("adhoc market order failed", "error", err)
+		http.Error(w, "adhoc market order failed", http.StatusInternalServerError)
+		return
 	}
 	w.WriteHeader(http.StatusOK)
 }
