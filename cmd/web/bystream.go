@@ -6,8 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"log"
-	"strings"
+	"os"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -22,8 +21,15 @@ type OrderUpdate struct {
 	CreateType string `json:"createType"`
 }
 
-type OrderResponse struct {
-	Data []OrderUpdate `json:"data"`
+// bybitWSMessage is the envelope for every Bybit WebSocket message.
+// Op is set for control messages (auth, subscribe, pong).
+// Topic is set for data messages (order updates).
+type bybitWSMessage struct {
+	Op      string          `json:"op"`
+	Success bool            `json:"success"`
+	RetMsg  string          `json:"ret_msg"`
+	Topic   string          `json:"topic"`
+	Data    json.RawMessage `json:"data"`
 }
 
 const (
@@ -37,43 +43,127 @@ const (
 func (a *application) WSByConnect(wsUrl string, eh exchange.ExchangeStrategy) {
 	bybitHandler, ok := eh.(*exchange.BybitHandler)
 	if !ok {
-		fmt.Println("FAILED TO CAST TO BYBIT HANDLER")
+		a.logger.Error("failed to cast to BybitHandler")
+		os.Exit(1)
 	}
-	address := wsUrl
-	c, _, err := websocket.DefaultDialer.Dial(address, nil)
+
+	for {
+		if err := a.bybitDial(wsUrl, bybitHandler); err != nil {
+			a.logger.Error("Bybit WebSocket disconnected, retrying in 5s", "error", err)
+		}
+		time.Sleep(5 * time.Second)
+	}
+}
+
+// bybitDial establishes one WebSocket session. Returns when the connection closes.
+func (a *application) bybitDial(wsUrl string, handler *exchange.BybitHandler) error {
+	c, _, err := websocket.DefaultDialer.Dial(wsUrl, nil)
 	if err != nil {
-		log.Fatal("Failed to connect:", err)
+		a.stateMu.Lock()
+		a.wsConnected = false
+		a.wsAuthenticated = false
+		a.stateMu.Unlock()
+		return fmt.Errorf("dial: %w", err)
 	}
-	defer c.Close()
+	defer func() {
+		c.Close()
+		a.stateMu.Lock()
+		a.wsConnected = false
+		a.wsAuthenticated = false
+		a.stateMu.Unlock()
+		a.logger.Info("Bybit WebSocket connection closed")
+	}()
 
-	fmt.Println("Connected.")
-	a.onOpen(c)
+	a.stateMu.Lock()
+	a.wsConnected = true
+	a.stateMu.Unlock()
+	a.logger.Info("Bybit WebSocket connected")
 
-	ticker := time.NewTicker(20 * time.Second)
+	a.sendAuth(c)
+	a.sendSubscription(c, "order")
+
+	// Ping ticker — stopped cleanly when this function returns.
+	stopPing := make(chan struct{})
 	go func() {
-		for range ticker.C {
-			err := c.WriteMessage(websocket.TextMessage, []byte("ping"))
-			if err != nil {
-				log.Println("Failed to send ping:", err)
+		ticker := time.NewTicker(20 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stopPing:
+				return
+			case <-ticker.C:
+				if err := c.WriteMessage(websocket.TextMessage, []byte("ping")); err != nil {
+					a.logger.Error("failed to send ping", "error", err)
+					return
+				}
+				a.stateMu.Lock()
+				a.wsLastPingAt = time.Now()
+				a.stateMu.Unlock()
+				a.logger.Debug("ping sent")
 			}
-			fmt.Println("Ping sent.")
 		}
 	}()
+	defer close(stopPing)
+
+	// Set an initial read deadline; reset on every received message.
+	c.SetReadDeadline(time.Now().Add(60 * time.Second))
 
 	for {
 		_, message, err := c.ReadMessage()
 		if err != nil {
-			log.Println("Failed to read message:", err)
-			return
+			return fmt.Errorf("read: %w", err)
 		}
-		a.receive(string(message), bybitHandler)
+		// Reset deadline on any activity.
+		c.SetReadDeadline(time.Now().Add(60 * time.Second))
+
+		a.stateMu.Lock()
+		a.wsLastMsgAt = time.Now()
+		a.stateMu.Unlock()
+
+		a.handleBybitMessage(string(message), handler)
 	}
 }
 
-func (a *application) onOpen(c *websocket.Conn) {
-	fmt.Println("Opened.")
-	a.sendAuth(c)
-	a.sendSubscription(c, "order")
+// handleBybitMessage routes an incoming message based on its type.
+func (a *application) handleBybitMessage(message string, handler *exchange.BybitHandler) {
+	// Bybit sends a plain "pong" text frame in response to our "ping".
+	if message == "pong" {
+		return
+	}
+
+	var msg bybitWSMessage
+	if err := json.Unmarshal([]byte(message), &msg); err != nil {
+		a.logger.Error("failed to parse Bybit message", "error", err, "raw", message)
+		return
+	}
+
+	switch {
+	case msg.Op == "auth":
+		a.stateMu.Lock()
+		a.wsAuthenticated = msg.Success
+		a.stateMu.Unlock()
+		if msg.Success {
+			a.logger.Info("Bybit WebSocket authenticated")
+		} else {
+			a.logger.Error("Bybit WebSocket auth failed", "msg", msg.RetMsg)
+		}
+
+	case msg.Op == "subscribe":
+		if msg.Success {
+			a.logger.Info("Bybit WebSocket subscription confirmed")
+		} else {
+			a.logger.Error("Bybit WebSocket subscription failed", "msg", msg.RetMsg)
+		}
+
+	case msg.Op == "pong":
+		// JSON pong frame — nothing to do.
+
+	case msg.Topic == "order":
+		a.receive(msg.Data, handler)
+
+	default:
+		a.logger.Debug("Bybit unhandled message", "op", msg.Op, "topic", msg.Topic)
+	}
 }
 
 func (a *application) sendAuth(c *websocket.Conn) {
@@ -91,13 +181,11 @@ func (a *application) sendAuth(c *websocket.Conn) {
 
 	message, err := json.Marshal(authMessage)
 	if err != nil {
-		log.Println("Failed to marshal auth message:", err)
+		a.logger.Error("failed to marshal auth message", "error", err)
 		return
 	}
-	err = c.WriteMessage(websocket.TextMessage, message)
-	if err != nil {
-		log.Println("Failed to send auth message:", err)
-		return
+	if err = c.WriteMessage(websocket.TextMessage, message); err != nil {
+		a.logger.Error("failed to send auth message", "error", err)
 	}
 }
 
@@ -109,62 +197,56 @@ func (a *application) sendSubscription(c *websocket.Conn, topic string) {
 
 	message, err := json.Marshal(subMessage)
 	if err != nil {
-		log.Println("Failed to marshal subscription message:", err)
+		a.logger.Error("failed to marshal subscription message", "error", err)
 		return
 	}
-	err = c.WriteMessage(websocket.TextMessage, message)
-	if err != nil {
-		log.Println("Failed to send subscription message:", err)
+	if err = c.WriteMessage(websocket.TextMessage, message); err != nil {
+		a.logger.Error("failed to send subscription message", "error", err)
 		return
 	}
-	fmt.Println("Subscription sent for topic:", topic)
+	a.logger.Info("Bybit WebSocket subscribed", "topic", topic)
 }
 
-func (a *application) receive(message string, handler *exchange.BybitHandler) {
-	fmt.Println(strings.Repeat("-", 50))
-	fmt.Println("|               RECEIVED ORDER UPDATE                |")
-	fmt.Println(strings.Repeat("-", 50))
-
-	var orderResp OrderResponse
-	err := json.Unmarshal([]byte(message), &orderResp)
-	if err != nil {
-		log.Println("Failed to unmarshal order:", err)
+func (a *application) receive(data json.RawMessage, handler *exchange.BybitHandler) {
+	var orders []OrderUpdate
+	if err := json.Unmarshal(data, &orders); err != nil {
+		a.logger.Error("failed to unmarshal Bybit order data", "error", err)
 		return
 	}
 
-	for _, order := range orderResp.Data {
+	for _, order := range orders {
+		a.logger.Info("Bybit order update",
+			"orderID", order.OrderID,
+			"status", order.Status,
+			"side", order.Side,
+			"createType", order.CreateType,
+		)
+
+		a.stateMu.RLock()
+		currOrder := a.CurrByMainOrder
+		a.stateMu.RUnlock()
 
 		switch order.CreateType {
 		case CREATE_TYPE_TP:
 			if order.Status == STATUS_FILLED {
-				fmt.Println(strings.Repeat("-", 50))
-				fmt.Println("|               INITIATING ORDER REENTRY                |")
-				fmt.Println(strings.Repeat("-", 50))
-				handler.PlaceOrder(
-					a.CurrByMainOrder.Category,
-					a.CurrByMainOrder.Symbol,
-					a.CurrByMainOrder.Side,
-					a.CurrByMainOrder.OrderType,
-					a.CurrByMainOrder.Quantity,
-					a.CurrByMainOrder.Price,
-					a.CurrByMainOrder.TakeProfit,
-					a.CurrByMainOrder.StopLoss,
-					a.CurrByMainOrder.Precision)
+				a.logger.Info("TP filled — initiating re-entry",
+					"orderID", order.OrderID,
+					"symbol", currOrder.Symbol,
+				)
+				if err := handler.ReEnter(currOrder); err != nil {
+					a.logger.Error("re-entry failed", "error", err, "symbol", currOrder.Symbol)
+				}
 			}
 		case CREATE_TYPE_SL:
 			if order.Status == STATUS_TRIGGERED {
-				fmt.Println(strings.Repeat("-", 50))
-				fmt.Println("|               STOP LOSS HIT                |")
-				fmt.Println(strings.Repeat("-", 50))
+				a.logger.Info("stop loss triggered — clearing position state",
+					"orderID", order.OrderID,
+					"symbol", currOrder.Symbol,
+				)
+				a.stateMu.Lock()
 				a.CurrByMainOrder = types.ByMainOrder{}
+				a.stateMu.Unlock()
 			}
 		}
-		fmt.Println(strings.Repeat("-", 50))
-		fmt.Printf("| OrderID    | %s\n", order.OrderID)
-		fmt.Printf("| Status     | %s\n", order.Status)
-		fmt.Printf("| Side       | %s\n", order.Side)
-		fmt.Printf("| CreateType | %s\n", order.CreateType)
-		fmt.Println(strings.Repeat("-", 50))
-		fmt.Println()
 	}
 }

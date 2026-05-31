@@ -14,7 +14,7 @@ type Signal interface {
 }
 
 const (
-	EQUITY_PERCENTAGE = 0.95
+	EQUITY_PERCENTAGE = 0.97
 )
 
 type ExchangeStrategy interface {
@@ -24,7 +24,6 @@ type ExchangeStrategy interface {
 func NewExchangeHandler(ctx context.Context, exchangeType string, apiKey string, secret string, stage types.Environment, byOrderChan chan types.ByMainOrder, biOrderChan chan types.BiSubmittedOrders, logger *slog.Logger) (ExchangeStrategy, error) {
 	switch exchangeType {
 	case types.EXCHANGE_BINANCE:
-		//TODO: add stage to this handler
 		return NewBinanceHandler(ctx, apiKey, secret, biOrderChan, logger), nil
 	case types.EXCHANGE_BYBIT:
 		return NewBybitHandler(ctx, apiKey, secret, stage, byOrderChan, logger), nil

@@ -3,7 +3,7 @@ module github.com/mnm458/sherpa
 go 1.22.2
 
 require (
-	github.com/adshao/go-binance/v2 v2.8.0
+	github.com/adshao/go-binance/v2 v2.8.2
 	github.com/gorilla/websocket v1.5.3
 	github.com/joho/godotenv v1.5.1
 	github.com/justinas/alice v1.2.0
@@ -11,6 +11,7 @@ require (
 )
 
 require (
+	github.com/binance/binance-connector-go v0.8.0 // indirect
 	github.com/bitly/go-simplejson v0.5.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/jpillora/backoff v1.0.0 // indirect

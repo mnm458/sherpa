@@ -43,17 +43,24 @@ func main() {
 	}
 	app.ExchangeID = cfg.ExchangeID
 
-	// Start exchange-specific services
+	// Always start listeners so channel sends in exchange handlers don't block.
+	// Re-entry is triggered by the WebSocket, not the listener, so this is safe.
+	switch cfg.Exchange {
+	case types.EXCHANGE_BYBIT:
+		go app.ListenForByOrderUpdates(ctx)
+	case types.EXCHANGE_BINANCE:
+		go app.ListenForBiOrderUpdates(ctx)
+	}
+
+	// Only open the WebSocket (which fires re-entry on TP fill) if the switch is on.
 	go func() {
 		if cfg.ReEntrySwitch {
 			var err error
 			switch cfg.Exchange {
 			case types.EXCHANGE_BYBIT:
-				go app.ListenForByOrderUpdates(ctx)
 				app.WSByConnect(app.wsURL, app.ExchangeHandler)
 			case types.EXCHANGE_BINANCE:
-				go app.ListenForBiOrderUpdates(ctx)
-				err = app.WSBiConnect(ctx, app.ExchangeHandler)
+				err = app.SetupWebSockets(ctx, app.ExchangeHandler)
 			}
 			if err != nil {
 				app.logger.Error("websocket error", slog.String("error", err.Error()))
@@ -104,7 +111,7 @@ func parseFlags() (Config, error) {
 	addr := flag.String("addr", ":4000", "HTTP network address")
 	ex := flag.String("exchange", "", "Exchange name")
 	env := flag.String("env", "", "Environment (TEST/PROD)")
-	reEntrySwitch := flag.Bool("reEntrySwitch", true, "ReEntrySwitch") //by default keep the switch on
+	reEntrySwitch := flag.Bool("reEntrySwitch", false, "ReEntrySwitch")
 
 	flag.Parse()
 
