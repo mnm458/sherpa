@@ -11,7 +11,6 @@ require (
 )
 
 require (
-	github.com/binance/binance-connector-go v0.8.0 // indirect
 	github.com/bitly/go-simplejson v0.5.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/jpillora/backoff v1.0.0 // indirect
